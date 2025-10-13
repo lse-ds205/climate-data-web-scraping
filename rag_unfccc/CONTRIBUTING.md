@@ -2,6 +2,8 @@
 
 This guide will help you set up your development environment to work on the Climate Policy Extractor project.
 
+> **Note**: Before starting development, please check [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for known bugs and planned improvements. This will help you avoid duplicate work and understand current limitations.
+
 ## 1. Install Python dependencies
 
 First, clone the repository and navigate to the project directory:

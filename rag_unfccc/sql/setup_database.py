@@ -16,6 +16,11 @@ def execute_sql_files(connection_string):
         conn.autocommit = True
         cursor = conn.cursor()
         
+        # Enable pgvector extension first
+        print("[MANUAL SETUP] Enabling pgvector extension...")
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        print("[MANUAL SETUP] pgvector extension enabled")
+        
         # Get all SQL files and sort them numerically
         sql_files = glob.glob(os.path.join(os.path.dirname(__file__), "*.sql"))
         sql_files.sort(key=lambda f: int(os.path.basename(f).split('_')[0]))

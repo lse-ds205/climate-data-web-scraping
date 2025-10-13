@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  db:
+    image: pgvector/pgvector:0.7.1-pg16
+    container_name: NDC_rag
+    environment:
+      POSTGRES_USER: climate
+      POSTGRES_PASSWORD: climate
+      POSTGRES_DB: climate
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.docker-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U climate -d climate"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
