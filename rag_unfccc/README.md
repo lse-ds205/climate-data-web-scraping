@@ -48,7 +48,7 @@ For more details about the project architecture and design decisions, please ref
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    pip install -r requirements/requirements.txt
    ```
-
+ 
 3. **Set up Supabase account**
    - Create a new Supabase project at [supabase.com](https://supabase.com)
    - Set up an Edge Function named `send-email`
@@ -78,9 +78,21 @@ For more details about the project architecture and design decisions, please ref
      ```
    - Run the database setup script:
      ```bash
-     python manual/setup_database.py
+     python sql/setup_database.py
      ```
-
+   
+   **⚠️ Windows Users: Database Connection**
+   
+   The system includes an **automatic Docker proxy workaround** for Windows users. When it detects you're running on Windows with a local Docker container, it automatically uses `docker exec` for database queries instead of direct network connections. This happens transparently - no configuration needed!
+   
+   For initial database setup, use the PowerShell script:
+   ```powershell
+   # Windows only - runs SQL files directly inside the Docker container
+   .\run_sql_in_docker.ps1
+   ```
+   
+   **How it works**: The proxy (`databases/docker_proxy.py`) detects Windows + local Docker and routes all SQL queries through `docker exec`, bypassing Windows Docker Desktop networking issues. When deployed to production (Linux server or remote database), it automatically uses direct connections.
+ 
 7. **Configure environment variables**
    - Create a `.env` file in the project root directory based on the example in the repository
    - Set the required API keys, database URL, and other configuration parameters
@@ -129,6 +141,8 @@ The system consists of multiple components that can be run individually or as pa
    ```bash
    python entrypoints/1_scrape.py
    ```
+   
+   **Country Filtering**: The scraper automatically filters documents based on the countries in your database. Only documents from the 85 countries defined in the `countries` table will be processed and downloaded. Documents from other countries are logged but excluded from the workflow. To modify the country list, update `sql/1_countries.sql` and reinitialize the database.
 
 2. **Text Extraction & Chunking**
    ```bash
@@ -219,6 +233,12 @@ flowchart TD
   N --> O["Web Interface<br>React / Next.js"]:::alt
 ```
 
+
+## 🤝 Contributing & Known Issues
+
+For information about setting up your development environment and contributing to this project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Known bugs and planned improvements** are tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). If you encounter a new issue or have suggestions for improvements, please check this file first or open a new issue on GitHub.
 
 ## 📞 Support
 

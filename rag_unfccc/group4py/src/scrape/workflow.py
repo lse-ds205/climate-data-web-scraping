@@ -11,7 +11,13 @@ project_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(project_root))
 import group4py
 from scrape.selenium import scrape_ndc_documents
-from scrape.db_operations import retrieve_existing_documents, insert_new_documents, update_existing_documents
+from scrape.db_operations import (
+    retrieve_existing_documents, 
+    insert_new_documents, 
+    update_existing_documents,
+    retrieve_allowed_countries,
+    filter_documents_by_countries
+)
 from scrape.comparator import compare_documents
 from scrape.config import ScrapingConfig, DEFAULT_CONFIG
 from exceptions import (
@@ -51,62 +57,72 @@ def run_scraping_workflow(config: Optional[ScrapingConfig] = None) -> Dict[str, 
         existing_docs = retrieve_existing_documents()
         logger.info(f"Found {len(existing_docs)} existing documents in database")
         
-        # Step 2: Scrape fresh documents from website
-        logger.info("Step 2: Scraping fresh documents from website...")
+        # Step 3: Scrape fresh documents from website
+        logger.info("Step 3: Scraping fresh documents from website...")
         try:
-            new_docs = scrape_ndc_documents(headless=config.headless, timeout=config.timeout)
-            logger.info(f"Scraped {len(new_docs)} documents from website")
+            scraped_docs = scrape_ndc_documents(headless=config.headless, timeout=config.timeout)
+            logger.info(f"Scraped {len(scraped_docs)} documents from website")
         except Exception as e:
             raise DocumentScrapingError(f"Failed to scrape documents: {str(e)}") from e
         
-        if not new_docs and config.abort_on_no_docs:
+        if not scraped_docs and config.abort_on_no_docs:
             logger.warning("No documents scraped from website - aborting workflow")
             return _create_result_summary(existing_docs, [], {}, 0, 0)
         
-        # Step 3: Compare documents to find changes
-        logger.info("Step 3: Comparing documents to identify changes...")
+        # Step 4: Filter documents by allowed countries
+        logger.info("Step 4: Filtering documents by allowed countries...")
+        if allowed_countries:
+            new_docs, excluded_docs = filter_documents_by_countries(scraped_docs, allowed_countries)
+            logger.info(f"Kept {len(new_docs)} documents from allowed countries, excluded {len(excluded_docs)} documents")
+        else:
+            new_docs = scraped_docs
+            excluded_docs = []
+            logger.warning("No country filtering applied - processing all scraped documents")
+        
+        # Step 5: Compare documents to find changes
+        logger.info("Step 5: Comparing documents to identify changes...")
         changes = compare_documents(existing_docs, new_docs)
         
-        # Step 4: Process new documents
+        # Step 6: Process new documents
         inserted_count = 0
         downloaded_count = 0
         failed_downloads = 0
         if changes['new']:
-            logger.info(f"Step 4: Processing {len(changes['new'])} new documents...")
+            logger.info(f"Step 6: Processing {len(changes['new'])} new documents...")
             inserted_count = insert_new_documents(changes['new'])
             logger.info(f"Successfully inserted {inserted_count}/{len(changes['new'])} new documents")
             
-            # Step 4.1: Download new documents
-            logger.info(f"Step 4.1: Downloading {len(changes['new'])} new documents...")
+            # Step 6.1: Download new documents
+            logger.info(f"Step 6.1: Downloading {len(changes['new'])} new documents...")
             downloaded_count, failed_downloads = _download_new_documents(changes['new'], config)
             logger.info(f"Successfully downloaded {downloaded_count}/{len(changes['new'])} new documents")
             if failed_downloads > 0:
                 logger.warning(f"Failed to download {failed_downloads} documents")
         else:
-            logger.info("Step 4: No new documents to process")
+            logger.info("Step 6: No new documents to process")
         
-        # Step 5: Process updated documents
+        # Step 7: Process updated documents
         updated_count = 0
         if changes['updated']:
-            logger.info(f"Step 5: Processing {len(changes['updated'])} updated documents...")
+            logger.info(f"Step 7: Processing {len(changes['updated'])} updated documents...")
             updated_count = update_existing_documents(changes['updated'])
             logger.info(f"Successfully updated {updated_count}/{len(changes['updated'])} documents")
         else:
-            logger.info("Step 5: No documents to update")
+            logger.info("Step 7: No documents to update")
         
-        # Step 6: Handle removed documents
+        # Step 8: Handle removed documents
         if changes['removed']:
             if config.process_removed_docs:
-                logger.info(f"Step 6: Processing {len(changes['removed'])} removed documents...")
+                logger.info(f"Step 8: Processing {len(changes['removed'])} removed documents...")
                 # TODO: Implement removed document processing
                 logger.info("Removed document processing not yet implemented")
             else:
-                logger.info(f"Step 6: Found {len(changes['removed'])} removed documents (not processing)")
+                logger.info(f"Step 8: Found {len(changes['removed'])} removed documents (not processing)")
                 _log_removed_documents(changes['removed'], config.log_removed_limit)
         else:
-            logger.info("Step 6: No removed documents found")
+            logger.info("Step 8: No removed documents found")
         
-        # Step 7: Summary
+        # Step 9: Summary
         result = _create_result_summary(
             existing_docs, 
             new_docs, 
@@ -114,7 +130,8 @@ def run_scraping_workflow(config: Optional[ScrapingConfig] = None) -> Dict[str, 
             inserted_count, 
             updated_count, 
             downloaded_count,
-            failed_downloads
+            failed_downloads,
+            len(excluded_docs) if excluded_docs else 0
         )
         _log_workflow_summary(result)
         
@@ -199,12 +216,14 @@ def _create_result_summary(
     inserted_count, 
     updated_count, 
     downloaded_count=0,
-    failed_downloads=0
+    failed_downloads=0,
+    excluded_count=0
 ) -> Dict[str, Any]:
     """Create workflow result summary."""
     return {
         'existing_count': len(existing_docs),
         'scraped_count': len(new_docs),
+        'excluded_count': excluded_count,
         'new_count': len(changes.get('new', [])),
         'updated_count': len(changes.get('updated', [])),
         'removed_count': len(changes.get('removed', [])),
@@ -222,6 +241,8 @@ def _log_workflow_summary(result: Dict[str, Any]) -> None:
     logger.info("WORKFLOW SUMMARY:")
     logger.info(f"  Documents in database: {result['existing_count']}")
     logger.info(f"  Documents on website: {result['scraped_count']}")
+    if result.get('excluded_count', 0) > 0:
+        logger.info(f"  Documents excluded (not in allowed countries): {result['excluded_count']}")
     logger.info(f"  New documents inserted: {result['inserted_count']}")
     logger.info(f"  New documents downloaded: {result.get('downloaded_count', 0)}")
     if result.get('failed_downloads', 0) > 0:
