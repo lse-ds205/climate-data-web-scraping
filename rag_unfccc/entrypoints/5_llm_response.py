@@ -26,6 +26,84 @@ from query import (
 logger = logging.getLogger(__name__)
 
 
+def _extract_document_metadata_from_chunks(chunks: List[Dict[str, Any]]) -> Dict[str, set]:
+    """
+    Extract unique document types and publication years from chunks.
+    
+    Args:
+        chunks: List of chunk dictionaries with doc_id references
+        
+    Returns:
+        Dictionary with 'document_types' and 'years' as sets
+    """
+    doc_info = {'document_types': set(), 'years': set()}
+    
+    # Import here to avoid circular imports
+    import importlib.util
+    output_path = project_root / "entrypoints" / "6_output.py"
+    spec_output = importlib.util.spec_from_file_location("output_module", output_path)
+    output_module = importlib.util.module_from_spec(spec_output)
+    spec_output.loader.exec_module(output_module)
+    get_document_metadata = output_module.get_document_metadata
+    
+    # Track processed doc_ids to avoid duplicate queries
+    processed_docs = set()
+    
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        
+        # Get doc_id from chunk
+        doc_id = chunk.get('doc_id')
+        if not doc_id or doc_id in processed_docs:
+            continue
+        
+        processed_docs.add(doc_id)
+        
+        # Get document metadata
+        doc_meta = get_document_metadata(str(doc_id))
+        
+        if doc_meta.get('document_type'):
+            doc_info['document_types'].add(doc_meta['document_type'])
+        
+        if doc_meta.get('publication_year'):
+            doc_info['years'].add(doc_meta['publication_year'])
+    
+    return doc_info
+
+
+def _format_document_metadata(doc_info: Dict[str, set]) -> str:
+    """
+    Format document metadata into a readable string.
+    
+    Args:
+        doc_info: Dictionary with 'document_types' and 'years' sets
+        
+    Returns:
+        Formatted string with document types and years
+    """
+    parts = []
+    
+    if doc_info.get('document_types'):
+        doc_types = sorted(doc_info['document_types'])
+        if len(doc_types) == 1:
+            parts.append(f"Document type: {doc_types[0]}")
+        else:
+            parts.append(f"Document types: {', '.join(doc_types)}")
+    
+    if doc_info.get('years'):
+        years = sorted(doc_info['years'])
+        if len(years) == 1:
+            parts.append(f"Publication year: {years[0]}")
+        else:
+            parts.append(f"Publication years: {', '.join(years)}")
+    
+    if parts:
+        return "Source information: " + "; ".join(parts)
+    
+    return ""
+
+
 def setup_llm(supports_guided_json: bool = True) -> LLMClient:
     """
     Setup and initialize the LLM client.
@@ -271,6 +349,7 @@ def process_response(
 ) -> Dict[str, Any]:
     """
     Process and validate the LLM response into final JSON format.
+    Automatically enriches explanations with document type and publication year from chunk metadata.
 
     Args:
         llm_response: Structured response from LLM (LLMResponseModel or None)
@@ -296,6 +375,23 @@ def process_response(
         # Override the question field with the short version if provided
         if main_question and 'question' in final_response:
             final_response['question'] = main_question
+        
+        # Enrich explanation with document metadata from chunks
+        if final_response and isinstance(final_response, dict):
+            answer = final_response.get('answer', {})
+            if isinstance(answer, dict):
+                detailed_response = answer.get('detailed_response', '')
+                if detailed_response and original_chunks:
+                    # Extract unique document types and years from cited chunks
+                    doc_info = _extract_document_metadata_from_chunks(original_chunks)
+                    if doc_info:
+                        # Append document metadata to explanation
+                        metadata_text = _format_document_metadata(doc_info)
+                        if metadata_text:
+                            # Only append if not already present (avoid duplication)
+                            if metadata_text.lower() not in detailed_response.lower():
+                                answer['detailed_response'] = f"{detailed_response}\n\n{metadata_text}"
+                                final_response['answer'] = answer
         
         logger.info("[5_LLM_RESPONSE] Successfully processed LLM response")
         return final_response

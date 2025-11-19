@@ -15,15 +15,57 @@ import group4py
 from embed.combined import CombinedEmbedding
 from embed.hoprag import HopRAGGraphProcessor
 from helpers.internal import Logger
+from databases.docker_proxy import get_database_connection
 from databases.auth import PostgresConnection
 from databases.models import DocChunkORM
 
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+def verify_embeddings(session, chunk_id):
+    """Verify that embeddings are being stored correctly in the database."""
+    try:
+        result = session.execute(text("""
+            SELECT id, 
+                   CASE WHEN transformer_embedding IS NOT NULL THEN 'YES' ELSE 'NO' END as has_transformer,
+                   CASE WHEN word2vec_embedding IS NOT NULL THEN 'YES' ELSE 'NO' END as has_word2vec,
+                   vector_dims(transformer_embedding) as transformer_dims,
+                   vector_dims(word2vec_embedding) as word2vec_dims
+            FROM doc_chunks 
+            WHERE id = :chunk_id
+        """), {"chunk_id": chunk_id})
+        
+        row = result.fetchone()
+        if row:
+            logger.info(f"[3_EMBED] VERIFICATION - Chunk {chunk_id}:")
+            logger.info(f"[3_EMBED]   Transformer: {row[1]} ({row[3]} dims)")
+            logger.info(f"[3_EMBED]   Word2Vec: {row[2]} ({row[4]} dims)")
+        else:
+            logger.warning(f"[3_EMBED] VERIFICATION - Chunk {chunk_id} not found in database")
+    except Exception as e:
+        logger.error(f"[3_EMBED] VERIFICATION ERROR: {e}")
+
+
+def is_orm_available(session):
+    """Check if session supports ORM queries"""
+    # Check if it's a Docker proxy session (which doesn't support ORM)
+    session_class_name = session.__class__.__name__
+    if 'DockerProxySession' in session_class_name:
+        logger.debug(f"[3_EMBED] Detected Docker proxy session: {session_class_name}")
+        return False
+    
+    # Check for ORM capabilities
+    has_query = hasattr(session, 'query')
+    has_commit = hasattr(session, 'commit')
+    has_container = hasattr(session, 'container_name')
+    
+    logger.debug(f"[3_EMBED] ORM check - query: {has_query}, commit: {has_commit}, container: {has_container}")
+    return has_query and has_commit and not has_container
+
 def collect_all_chunk_texts(session):
     """
     Collect all chunk texts from the database for global Word2Vec training.
+    Uses ORM when available (faster), falls back to raw SQL for Docker proxy.
     
     Returns:
         List of chunk texts
@@ -31,8 +73,20 @@ def collect_all_chunk_texts(session):
     logger.info("[3_EMBED] Collecting all chunks from database for global Word2Vec training...")
     
     try:
-        chunks = session.query(DocChunkORM.content).filter(DocChunkORM.content.isnot(None)).all()
-        texts = [chunk.content for chunk in chunks if chunk.content and chunk.content.strip()]
+        orm_available = is_orm_available(session)
+        logger.info(f"[3_EMBED] ORM available: {orm_available}")
+        
+        if orm_available:
+            # Use ORM approach (faster on non-Docker systems)
+            logger.debug("[3_EMBED] Using ORM queries for better performance")
+            chunks = session.query(DocChunkORM.content).filter(DocChunkORM.content.isnot(None)).all()
+            texts = [chunk.content for chunk in chunks if chunk.content and chunk.content.strip()]
+        else:
+            # Use raw SQL fallback (Docker proxy compatibility)
+            logger.debug("[3_EMBED] Using raw SQL for Docker proxy compatibility")
+            result = session.execute(text("SELECT content FROM doc_chunks WHERE content IS NOT NULL"))
+            rows = result.fetchall()
+            texts = [row[0] for row in rows if row[0] and row[0].strip()]
         
         logger.info(f"[3_EMBED] Collected {len(texts)} chunks from database")
         return texts
@@ -40,8 +94,6 @@ def collect_all_chunk_texts(session):
     except Exception as e:
         logger.error(f"[3_EMBED] Error collecting chunks: {e}")
         return []
-    finally:
-        session.close()
 
 
 async def embed_all_chunks(force_reembed: bool = False, db = Optional[PostgresConnection], session = Optional[None]):
@@ -86,66 +138,168 @@ async def embed_all_chunks(force_reembed: bool = False, db = Optional[PostgresCo
         logger.error("[3_EMBED] No embedding models loaded successfully")
         return
 
-    # Step 3: Get all chunks from database
+    # Step 3: Get all chunks from database (hybrid ORM/SQL approach)
     
     try:
-        # Query chunks that need embeddings (or all if force_reembed)
-        if force_reembed:
-            chunks_query = session.query(DocChunkORM).all()
-            logger.info(f"[3_EMBED] Force re-embedding: Processing all {len(chunks_query)} chunks")
-        else:
-            chunks_query = session.query(DocChunkORM).filter(
-                (DocChunkORM.transformer_embedding.is_(None)) | 
-                (DocChunkORM.word2vec_embedding.is_(None))
-            ).all()
-            logger.info(f"[3_EMBED] Processing {len(chunks_query)} chunks without embeddings")
-        
-        if not chunks_query:
-            logger.info("[3_EMBED] No chunks need embedding. All done!")
-            return
-        
-        # Step 4: Generate embeddings for all chunks
-        logger.info("[3_EMBED] Generating embeddings for chunks...")
-        
-        processed_count = 0
-        for chunk in tqdm(chunks_query, desc="Generating embeddings"):
-            try:
-                if not chunk.content or not chunk.content.strip():
-                    logger.warning(f"[3_EMBED] Skipping empty chunk {chunk.id}")
-                    continue
-                
-                # Generate transformer embedding
-                transformer_embedding = embedding_model.transformer_embedder.embed_transformer(chunk.content)
-                
-                # Generate Word2Vec embedding using global model
-                word2vec_embedding = embedding_model.word2vec_embedder.embed_text(chunk.content)
-                
-                # Update chunk with embeddings
-                if transformer_embedding and len(transformer_embedding) > 0:
-                    # Ensure all elements are floats
-                    transformer_embedding = [float(val) if not isinstance(val, float) else val for val in transformer_embedding]
-                    chunk.transformer_embedding = transformer_embedding
-                
-                if word2vec_embedding is not None and len(word2vec_embedding) > 0:
-                    # Ensure all elements are floats and convert to list
-                    word2vec_embedding = [float(val) if not isinstance(val, float) else val for val in word2vec_embedding.tolist()]
-                    chunk.word2vec_embedding = word2vec_embedding
-                
-                processed_count += 1
-                
-                # Commit periodically to avoid holding large transactions (every 500 chunks)
-                if processed_count % 500 == 0:
-                    session.commit()
-                    logger.debug(f"[3_EMBED] Committed batch at {processed_count} chunks")
+        if is_orm_available(session):
+            # Use ORM approach (faster on non-Docker systems)
+            logger.debug("[3_EMBED] Using ORM queries for better performance")
+            if force_reembed:
+                chunks_query = session.query(DocChunkORM).all()
+                logger.info(f"[3_EMBED] Force re-embedding: Processing all {len(chunks_query)} chunks")
+            else:
+                chunks_query = session.query(DocChunkORM).filter(
+                    (DocChunkORM.transformer_embedding.is_(None)) | 
+                    (DocChunkORM.word2vec_embedding.is_(None))
+                ).all()
+                logger.info(f"[3_EMBED] Processing {len(chunks_query)} chunks without embeddings")
+            
+            if not chunks_query:
+                logger.info("[3_EMBED] No chunks need embedding. All done!")
+                return
+            
+            # Step 4: Generate embeddings for all chunks (ORM approach)
+            logger.info("[3_EMBED] Generating embeddings for chunks...")
+            
+            processed_count = 0
+            for i, chunk in enumerate(tqdm(chunks_query, desc="Generating embeddings")):
+                try:
+                    if not chunk.content or not chunk.content.strip():
+                        logger.warning(f"[3_EMBED] Skipping empty chunk {chunk.id}")
+                        continue
                     
-            except Exception as e:
-                logger.error(f"[3_EMBED] Error processing chunk {str(chunk.id)}: {str(e)}")
-                logger.error(f"[3_EMBED] Traceback: {traceback.format_exc()}")
-                continue
-        
-        # Final commit
-        session.commit()
-        logger.info(f"[3_EMBED] Successfully generated embeddings for {processed_count} chunks")
+                    # Generate transformer embedding
+                    transformer_embedding = embedding_model.transformer_embedder.embed_transformer(chunk.content)
+                    
+                    # Generate Word2Vec embedding using global model
+                    word2vec_embedding = embedding_model.word2vec_embedder.embed_text(chunk.content)
+                    
+                    # Update chunk with embeddings (ORM approach)
+                    if transformer_embedding and len(transformer_embedding) > 0:
+                        # Ensure all elements are floats
+                        transformer_embedding = [float(val) if not isinstance(val, float) else val for val in transformer_embedding]
+                        
+                        # Log embedding details for monitoring
+                        logger.info(f"[3_EMBED] Processing chunk {i+1}/{len(chunks_query)}: {chunk.id}")
+                        logger.info(f"[3_EMBED] Transformer embedding: {len(transformer_embedding)} dimensions, first 3 values: {transformer_embedding[:3]}")
+                        
+                        chunk.transformer_embedding = transformer_embedding
+                    
+                    if word2vec_embedding is not None and len(word2vec_embedding) > 0:
+                        # Ensure all elements are floats and convert to list
+                        word2vec_embedding = [float(val) if not isinstance(val, float) else val for val in word2vec_embedding.tolist()]
+                        
+                        # Log Word2Vec embedding details
+                        logger.info(f"[3_EMBED] Word2Vec embedding: {len(word2vec_embedding)} dimensions, first 3 values: {word2vec_embedding[:3]}")
+                        
+                        chunk.word2vec_embedding = word2vec_embedding
+                    
+                    processed_count += 1
+                    
+                    # Verify embeddings every 100 chunks
+                    if processed_count % 100 == 0:
+                        verify_embeddings(session, chunk.id)
+                    
+                    # Commit periodically to avoid holding large transactions (every 500 chunks)
+                    if processed_count % 500 == 0:
+                        session.commit()
+                        logger.info(f"[3_EMBED] Committed batch at {processed_count} chunks")
+                        
+                except Exception as e:
+                    logger.error(f"[3_EMBED] Error processing chunk {str(chunk.id)}: {str(e)}")
+                    logger.error(f"[3_EMBED] Traceback: {traceback.format_exc()}")
+                    continue
+            
+            # Final commit
+            session.commit()
+            logger.info(f"[3_EMBED] Successfully generated embeddings for {processed_count} chunks")
+            
+        else:
+            # Use raw SQL fallback (Docker proxy compatibility)
+            logger.debug("[3_EMBED] Using raw SQL for Docker proxy compatibility")
+            if force_reembed:
+                result = session.execute(text("SELECT id, content FROM doc_chunks WHERE content IS NOT NULL"))
+                logger.info(f"[3_EMBED] Force re-embedding: Processing all chunks")
+            else:
+                result = session.execute(text("""
+                    SELECT id, content FROM doc_chunks 
+                    WHERE content IS NOT NULL 
+                    AND (transformer_embedding IS NULL OR word2vec_embedding IS NULL)
+                """))
+                logger.info(f"[3_EMBED] Processing chunks without embeddings")
+            
+            chunks_data = result.fetchall()
+            
+            if not chunks_data:
+                logger.info("[3_EMBED] No chunks need embedding. All done!")
+                return
+            
+            logger.info(f"[3_EMBED] Found {len(chunks_data)} chunks to process")
+            
+            # Step 4: Generate embeddings for all chunks (optimized sequential approach)
+            logger.info("[3_EMBED] Generating embeddings for chunks...")
+            
+            processed_count = 0
+            # Process in optimized batches for better performance
+            batch_size = 500  # Process 500 chunks at a time for better performance
+            for batch_start in range(0, len(chunks_data), batch_size):
+                batch_end = min(batch_start + batch_size, len(chunks_data))
+                batch_chunks = chunks_data[batch_start:batch_end]
+                
+                logger.info(f"[3_EMBED] Processing batch {batch_start//batch_size + 1}/{(len(chunks_data) + batch_size - 1)//batch_size} ({len(batch_chunks)} chunks)")
+                
+                for i, (chunk_id, content) in enumerate(tqdm(batch_chunks, desc=f"Batch {batch_start//batch_size + 1}")):
+                    try:
+                        if not content or not content.strip():
+                            logger.warning(f"[3_EMBED] Skipping empty chunk {chunk_id}")
+                            continue
+                        
+                        # Generate transformer embedding
+                        transformer_embedding = embedding_model.transformer_embedder.embed_transformer(content)
+                        
+                        # Generate Word2Vec embedding using global model
+                        word2vec_embedding = embedding_model.word2vec_embedder.embed_text(content)
+                        
+                        # Update chunk with embeddings using raw SQL
+                        if transformer_embedding and len(transformer_embedding) > 0:
+                            # Ensure all elements are floats
+                            transformer_embedding = [float(val) if not isinstance(val, float) else val for val in transformer_embedding]
+                            # Convert to PostgreSQL pgvector format (square brackets)
+                            transformer_array = "[" + ",".join(map(str, transformer_embedding)) + "]"
+                            
+                            session.execute(text("""
+                                UPDATE doc_chunks 
+                                SET transformer_embedding = :embedding 
+                                WHERE id = :chunk_id
+                            """), {"embedding": transformer_array, "chunk_id": chunk_id})
+                        
+                        if word2vec_embedding is not None and len(word2vec_embedding) > 0:
+                            # Ensure all elements are floats and convert to list
+                            word2vec_embedding = [float(val) if not isinstance(val, float) else val for val in word2vec_embedding.tolist()]
+                            # Convert to PostgreSQL pgvector format (square brackets)
+                            word2vec_array = "[" + ",".join(map(str, word2vec_embedding)) + "]"
+                            
+                            session.execute(text("""
+                                UPDATE doc_chunks 
+                                SET word2vec_embedding = :embedding 
+                                WHERE id = :chunk_id
+                            """), {"embedding": word2vec_array, "chunk_id": chunk_id})
+                        
+                        processed_count += 1
+                        
+                        # Commit periodically to avoid holding large transactions (every 100 chunks)
+                        if processed_count % 100 == 0:
+                            session.commit()
+                            logger.info(f"[3_EMBED] Committed batch at {processed_count} chunks")
+                            
+                    except Exception as e:
+                        logger.error(f"[3_EMBED] Error processing chunk {chunk_id}: {str(e)}")
+                        logger.error(f"[3_EMBED] Traceback: {traceback.format_exc()}")
+                        continue
+            
+            # Final commit
+            session.commit()
+            logger.info(f"[3_EMBED] Successfully generated embeddings for {processed_count} chunks")
         
         # Step 5: Run HopRAG processing after embeddings are complete
         try:
@@ -223,7 +377,7 @@ async def run_script(force_reembed: bool = False):
     Args:
         force_reembed: If True, regenerate embeddings even if they already exist
     """
-    db = PostgresConnection()
+    db = get_database_connection()  # Use Docker proxy on Windows
     
     try:
         with db.Session() as session:

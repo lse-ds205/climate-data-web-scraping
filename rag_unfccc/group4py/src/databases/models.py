@@ -47,6 +47,7 @@ class NDCDocumentORM(Base):
     download_error = Column(String)
     download_attempts = Column(Integer, default=0)
     extracted_text = Column(Text)
+    document_type = Column(String, nullable=True, index=True)  # KEY METADATA: NDC, BTR, LTS, Law, Policy, etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

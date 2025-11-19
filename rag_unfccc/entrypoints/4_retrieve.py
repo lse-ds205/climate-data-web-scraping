@@ -11,13 +11,15 @@ import argparse
 import json
 import logging
 from datetime import datetime
+import re
 
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 import group4py
 from helpers.internal import Logger
 from schemas.general import UUIDEncoder
-from databases.auth import PostgresConnection
+from databases.docker_proxy import get_database_connection
+from constants.entities import extract_country_from_query, extract_entities_from_query, EntityType
 from evaluator import (
     VectorComparison,
     RegexComparison,
@@ -51,7 +53,47 @@ QUESTION_PROMPTS = {
     8: QUESTION_PROMPT_8
 }
 logger = logging.getLogger(__name__)
-db = PostgresConnection()
+db = get_database_connection()  # Use Docker proxy on Windows
+
+# Country extraction now handled by the centralized entity management system
+# See constants.entities for the new modular approach
+
+def extract_metadata_from_query(query: str) -> Dict[str, Any]:
+    """
+    Extract all relevant metadata from a query using the entity management system.
+    
+    Args:
+        query: The search query text
+        
+    Returns:
+        Dictionary containing extracted entities and metadata
+    """
+    # Extract all entity types
+    entity_matches = extract_entities_from_query(query)
+    
+    # Organize by entity type
+    metadata = {
+        'countries': [],
+        'companies': [],
+        'banks': [],
+        'all_entities': entity_matches
+    }
+    
+    for match in entity_matches:
+        if match.entity_type == EntityType.COUNTRY:
+            metadata['countries'].append(match.entity_name)
+        elif match.entity_type == EntityType.COMPANY:
+            metadata['companies'].append(match.entity_name)
+        elif match.entity_type == EntityType.BANK:
+            metadata['banks'].append(match.entity_name)
+    
+    # Log extracted metadata
+    if any(metadata.values()):
+        logger.info(f"[4_RETRIEVE] Extracted metadata from query: {metadata}")
+    else:
+        logger.info(f"[4_RETRIEVE] No entities detected in query: '{query[:50]}...'")
+    
+    return metadata
 
 
 def embed_prompt(prompt):
@@ -258,21 +300,32 @@ def retrieve_chunks(
     ensure_indices=True,
     country=None,
     n_per_doc=None,
-    min_similarity=0.0
+    min_similarity=0.0,
+    document_type=None,
+    year=None,
+    sector=None,
+    custom_filter=None,
+    entity_type=None,
+    entity_name=None
 ):
     """
     Retrieve and evaluate the most similar chunks from the database using
-    comprehensive evaluation. First evaluates ALL chunks, then returns top ones
-    based on weighted average score.
+    comprehensive evaluation with optimized SQL filtering and flexible metadata filtering.
     
     Args:
         embedded_prompts: Tuple of (transformer_embedding, word2vec_embedding)
         prompt: Original text prompt for evaluation
         top_k: Number of top similar chunks to retrieve
         ensure_indices: Whether to ensure vector indices exist before querying
-        country: Optional country name to filter documents by
+        country: Optional country name to filter documents by (SQL-level optimization)
         n_per_doc: Optional number of chunks to return per document (overrides top_k)
         min_similarity: Minimum similarity threshold (0-1)
+        document_type: Optional document type filter (e.g., 'NDC', 'Sustainability Report')
+        year: Optional minimum year filter (e.g., 2020)
+        sector: Optional sector filter (e.g., 'Technology', 'Energy')
+        custom_filter: Optional custom filter function for complex logic
+        entity_type: Optional entity type filter ('country', 'company', 'bank')
+        entity_name: Optional entity name filter (e.g., 'Apple', 'Angola', 'JPMorgan')
         
     Returns:
         List of dictionaries containing evaluated chunks with comprehensive scores
@@ -281,94 +334,164 @@ def retrieve_chunks(
         # Unpack the embeddings
         transformer_embedding, word2vec_embedding = embedded_prompts
         
+        # Auto-detect entities from query if not provided
+        if country is None and entity_name is None:
+            country = extract_country_from_query(prompt)
+        
+        # Extract additional metadata for enhanced filtering
+        metadata = extract_metadata_from_query(prompt)
+        
+        # Determine entity filtering strategy
+        entity_filter = None
+        if country:
+            entity_filter = {'type': 'country', 'name': country, 'field': 'country'}
+        elif entity_name and entity_type:
+            entity_filter = {'type': entity_type, 'name': entity_name, 'field': entity_type}
+        elif entity_name:
+            # Try to auto-detect entity type from name
+            if entity_name in [match.entity_name for match in metadata.get('all_entities', [])]:
+                for match in metadata.get('all_entities', []):
+                    if match.entity_name == entity_name:
+                        entity_filter = {'type': match.entity_type.value, 'name': entity_name, 'field': match.entity_type.value}
+                        break
+        
         # Ensure vector indices exist if requested
         if ensure_indices:
             if not VectorComparison.create_vector_indices():
                 pass  # Continue anyway
         
-        # Get all chunks from database (without filtering by country in SQL)
+        # Build optimized SQL query with entity filtering
         session = db.Session()
         try:
-            # Get all chunks without country filtering in SQL
-            query = text("SELECT * FROM doc_chunks")
-            result = session.execute(query)
-            all_chunks = []
+            if entity_filter:
+                # Use entity-specific SQL filtering for performance
+                # Include all metadata fields needed for source verification
+                query = text(f"""
+                    SELECT 
+                        id, 
+                        content, 
+                        doc_id, 
+                        chunk_data,
+                        page,
+                        chunk_index,
+                        paragraph,
+                        language
+                    FROM doc_chunks 
+                    WHERE LOWER(chunk_data->>'{entity_filter['field']}') = LOWER(:entity_name)
+                """)
+                result = session.execute(query, {"entity_name": entity_filter['name']})
+                logger.info(f"[4_RETRIEVE] Filtering chunks by {entity_filter['type']}: {entity_filter['name']}")
+            else:
+                # Get all chunks if no entity specified
+                # Include all metadata fields needed for source verification
+                query = text("""
+                    SELECT 
+                        id, 
+                        content, 
+                        doc_id, 
+                        chunk_data,
+                        page,
+                        chunk_index,
+                        paragraph,
+                        language
+                    FROM doc_chunks
+                """)
+                result = session.execute(query)
+                logger.info("[4_RETRIEVE] Retrieving chunks from all entities")
             
+            # Convert results to chunk dictionaries with all metadata
+            all_chunks = []
             for row in result:
-                # Ensure all potential UUID values are converted to strings
                 chunk = {
-                    'id': str(row.id),
-                    'content': row.content,
-                    'doc_id': str(row.doc_id),  # Convert doc_id to string
-                    'chunk_data': row.chunk_data
+                    'id': str(row[0]),  # id
+                    'content': row[1],  # content
+                    'doc_id': str(row[2]),  # doc_id
+                    'chunk_data': row[3] if len(row) > 3 else {},  # chunk_data
+                    'page': row[4] if len(row) > 4 else None,  # page
+                    'chunk_index': row[5] if len(row) > 5 else None,  # chunk_index
+                    'paragraph': row[6] if len(row) > 6 else None,  # paragraph
+                    'language': row[7] if len(row) > 7 else None  # language
                 }
-                
-                # Filter by country in memory using the chunk_data JSON
-                if country is not None:
-                    chunk_country = chunk.get('chunk_data', {}).get('country', '')
-                    if chunk_country.lower() != country.lower():
-                        continue
-                
                 all_chunks.append(chunk)
             
             session.close()
+            
+            # Log retrieval statistics
+            if all_chunks:
+                logger.info(f"[4_RETRIEVE] Retrieved {len(all_chunks)} chunks from database")
+                
+                # Show entity distribution for debugging
+                if not entity_filter:  # Only show entity breakdown if not filtering
+                    entity_counts = {}
+                    for chunk in all_chunks:
+                        chunk_data = chunk.get('chunk_data', {})
+                        # Check for different entity types
+                        for entity_type in ['country', 'company', 'bank']:
+                            entity_name = chunk_data.get(entity_type, 'Unknown')
+                            if entity_name != 'Unknown':
+                                entity_counts[f"{entity_type}:{entity_name}"] = entity_counts.get(f"{entity_type}:{entity_name}", 0) + 1
+                    
+                    logger.info(f"[4_RETRIEVE] Entity distribution: {dict(sorted(entity_counts.items()))}")
+            else:
+                logger.info("[4_RETRIEVE] No chunks retrieved from database")
+                
+                # Debug: Check if database has any chunks
+                try:
+                    session = db.Session()
+                    total_count = session.execute(text("SELECT COUNT(*) FROM doc_chunks")).scalar()
+                    logger.info(f"[4_RETRIEVE] Database contains {total_count} total chunks")
+                    
+                    if entity_filter:
+                        # Check if entity exists in database
+                        entity_count = session.execute(text(f"""
+                            SELECT COUNT(*) FROM doc_chunks 
+                            WHERE LOWER(chunk_data->>'{entity_filter['field']}') = LOWER(:entity_name)
+                        """), {"entity_name": entity_filter['name']}).scalar()
+                        logger.info(f"[4_RETRIEVE] Database contains {entity_count} chunks for {entity_filter['type']} '{entity_filter['name']}'")
+                    
+                    session.close()
+                except Exception as db_error:
+                    logger.info(f"[4_RETRIEVE] Error checking database: {db_error}")
+                    if session:
+                        session.close()
+                    return []
+            
         except Exception as e:
             logger.info(f"[4_RETRIEVE] Error retrieving chunks: {e}")
             if session:
                 session.close()
             return []
-        
-        # Add debugging to see what countries we actually retrieved
-        if all_chunks:
-            # Extract country from chunk_data JSON
-            countries_found = set()
-            for chunk in all_chunks:
-                chunk_country = chunk.get('chunk_data', {}).get('country', 'Unknown')
-                countries_found.add(chunk_country)
-            
-            logger.info(
-                f"[4_RETRIEVE] DEBUG: Found chunks from {len(countries_found)} "
-                f"countries: {sorted(countries_found)}"
-            )
-            
-            # Show count per country
-            country_counts = {}
-            for chunk in all_chunks:
-                chunk_country = chunk.get('chunk_data', {}).get('country', 'Unknown')
-                country_counts[chunk_country] = country_counts.get(
-                    chunk_country, 0
-                ) + 1
-            
-            for country_name, count in sorted(country_counts.items()):
-                logger.info(f"[4_RETRIEVE] DEBUG: {country_name}: {count} chunks")
-        else:
-            logger.info("[4_RETRIEVE] DEBUG: No chunks retrieved from database")
-            
-            # Check if there are any chunks in the database at all
-            try:
-                session = db.Session()
-                total_count = session.execute(
-                    text("SELECT COUNT(*) FROM doc_chunks")
-                ).scalar()
-                logger.info(
-                    f"[4_RETRIEVE] DEBUG: Database has {total_count} total chunks"
-                )
-                
-                # Get list of all countries in database using JSON extraction
-                countries_in_db = session.execute(text(
-                    "SELECT DISTINCT chunk_data->>'country' FROM doc_chunks "
-                    "WHERE chunk_data->>'country' IS NOT NULL "
-                    "ORDER BY chunk_data->>'country'"
-                )).fetchall()
-                countries_list = [row[0] for row in countries_in_db if row[0]]
-                logger.info(
-                    f"[4_RETRIEVE] DEBUG: Countries in database: {countries_list}"
-                )
-                session.close()
-            except Exception as db_error:
-                logger.info(f"[4_RETRIEVE] DEBUG: Error checking database: {db_error}")
 
-        # Step 2: Run comprehensive evaluation on ALL chunks
+        # Apply additional flexible filtering if specified
+        if document_type or year or sector or custom_filter:
+            logger.info(f"[4_RETRIEVE] Applying flexible filtering: document_type={document_type}, year={year}, sector={sector}")
+            
+            filtered_chunks = []
+            for chunk in all_chunks:
+                chunk_data = chunk.get('chunk_data', {})
+                
+                # Document type filtering
+                if document_type and chunk_data.get('document_type') != document_type:
+                    continue
+                
+                # Year filtering
+                if year and chunk_data.get('year', 0) < year:
+                    continue
+                
+                # Sector filtering
+                if sector and chunk_data.get('sector') != sector:
+                    continue
+                
+                # Custom filter function
+                if custom_filter and not custom_filter(chunk):
+                    continue
+                
+                filtered_chunks.append(chunk)
+            
+            all_chunks = filtered_chunks
+            logger.info(f"[4_RETRIEVE] After flexible filtering: {len(all_chunks)} chunks remaining")
+
+        # Run comprehensive evaluation on filtered chunks
         evaluated_chunks = evaluate_chunks(
             prompt=prompt, 
             chunks=all_chunks,
@@ -377,16 +500,20 @@ def retrieve_chunks(
         )
 
         if not evaluated_chunks:
+            logger.info("[4_RETRIEVE] No chunks passed evaluation")
             return []
         
-        # Step 4: Apply minimum similarity filter after evaluation
+        # Apply minimum similarity filter after evaluation
         if min_similarity > 0.0:
+            before_count = len(evaluated_chunks)
             evaluated_chunks = [
                 chunk for chunk in evaluated_chunks 
                 if chunk.get('combined_score', 0) >= min_similarity
             ]
+            after_count = len(evaluated_chunks)
+            logger.info(f"[4_RETRIEVE] Filtered by similarity threshold {min_similarity}: {before_count} -> {after_count} chunks")
         
-        # Step 5: Handle n_per_doc constraint if specified
+        # Handle n_per_doc constraint if specified
         if n_per_doc is not None:
             doc_chunk_counts = {}
             final_chunks = []
@@ -402,11 +529,14 @@ def retrieve_chunks(
                     break
             
             evaluated_chunks = final_chunks
+            logger.info(f"[4_RETRIEVE] Applied n_per_doc={n_per_doc} constraint: {len(evaluated_chunks)} chunks")
         
-        # Step 6: Limit to requested top_k
+        # Limit to requested top_k
         if len(evaluated_chunks) > top_k:
             evaluated_chunks = evaluated_chunks[:top_k]
+            logger.info(f"[4_RETRIEVE] Limited to top_k={top_k}: {len(evaluated_chunks)} chunks")
         
+        logger.info(f"[4_RETRIEVE] Returning {len(evaluated_chunks)} final chunks")
         return evaluated_chunks
             
     except Exception as e:
@@ -422,9 +552,13 @@ def retrieve_chunks_with_hop(
 ) -> List[Dict[str, Any]]:
     """
     Retrieve chunks using graph-based multi-hop reasoning through 
-    relationship-based navigation.
+    relationship-based navigation with optimized country filtering.
     """
     try:
+        # Auto-detect country from query if not provided
+        if country is None:
+            country = extract_country_from_query(prompt)
+        
         logger.info(
             f"[HOP_RETRIEVE] Starting hop retrieval for country: {country}, "
             f"query: '{prompt[:50]}...'"
@@ -544,7 +678,7 @@ def retrieve_chunks_with_hop(
 
 @Logger.log(log_file=project_root / "logs/retrieve.log", log_level="INFO")
 def run_script(
-    question_number: int = None,
+    question: str = None,
     country: Optional[str] = None,
     use_hop_retrieval: bool = False
 ) -> List[Dict[str, Any]]:
@@ -552,8 +686,8 @@ def run_script(
     Main function to run the retrieval script.
     
     Args:
-        question_number: The question number (1-8) to use from predefined prompts.
-                         If None, runs all questions.
+        question: The question number (1-8) for predefined prompts OR custom question text.
+                 If None, runs all predefined questions.
         country: Optional country name to filter documents by.
         use_hop_retrieval: Whether to use graph-based hop retrieval in addition
                           to vector retrieval.
@@ -572,12 +706,24 @@ def run_script(
         all_evaluated_chunks = []
         
         # Determine which questions to run
-        if question_number is not None and question_number in QUESTION_PROMPTS:
-            questions_to_run = [question_number]
+        if question is not None:
+            # Check if it's a predefined question number
+            try:
+                question_num = int(question)
+                if question_num in QUESTION_PROMPTS:
+                    questions_to_run = [question_num]
+                    logger.info(f"[4_RETRIEVE] Using predefined question {question_num}")
+                else:
+                    raise ValueError(f"Question number {question_num} not in range 1-8")
+            except ValueError:
+                # It's a custom question text
+                questions_to_run = [question]
+                logger.info(f"[4_RETRIEVE] Using custom question: {question}")
         else:
-            questions_to_run = list(range(1, 9))  # Run all questions 1-8
+            questions_to_run = list(range(1, 9))  # Run all predefined questions 1-8
+            logger.info(f"[4_RETRIEVE] Running all predefined questions: {questions_to_run}")
         
-        logger.info(f"[4_RETRIEVE] Running questions: {questions_to_run}")
+        logger.info(f"[4_RETRIEVE] Questions to run: {questions_to_run}")
         
         # If no specific country is provided, get all countries from database
         if country is None:
@@ -591,6 +737,7 @@ def run_script(
                 )).fetchall()
                 countries_to_process = [row[0] for row in countries_result if row[0]]
                 session.close()
+                logger.info(f"[4_RETRIEVE] Processing all {len(countries_to_process)} countries from database")
             except Exception as e:
                 logger.info(f"[4_RETRIEVE] Error getting countries: {e}")
                 countries_to_process = []
@@ -598,6 +745,7 @@ def run_script(
                     session.close()
         else:
             countries_to_process = [country]
+            logger.info(f"[4_RETRIEVE] Processing specific country: {country}")
         
         logger.info(f"[4_RETRIEVE] Processing countries: {countries_to_process}")
         
@@ -629,11 +777,17 @@ def run_script(
                 }
             
             # Process each question for this country
-            for q_num in questions_to_run:
-                logger.info(f"[4_RETRIEVE] Processing question {q_num} for {country_name}")
+            for q_item in questions_to_run:
+                logger.info(f"[4_RETRIEVE] Processing question {q_item} for {country_name}")
                 
-                # Get the prompt text from the corresponding QUESTION_PROMPT
-                prompt = QUESTION_PROMPTS[q_num]
+                # Get the prompt text - either from predefined prompts or custom question
+                if isinstance(q_item, int) and q_item in QUESTION_PROMPTS:
+                    prompt = QUESTION_PROMPTS[q_item]
+                    question_key = f"question_{q_item}"
+                else:
+                    # Custom question text
+                    prompt = q_item
+                    question_key = f"custom_question"
                 
                 # Always do standard vector-based retrieval for all questions
                 # Step 1: Embed the prompt using both models
@@ -652,14 +806,14 @@ def run_script(
                 
                 # Store standard retrieval data
                 standard_question_data = {
-                    "question_number": q_num,
+                    "question_number": q_item if isinstance(q_item, int) else None,
                     "question": prompt,
                     "timestamp": datetime.now().isoformat(),
                     "chunk_count": len(standard_chunks),
                     "top_k_chunks": standard_chunks
                 }
                 
-                standard_country_data["questions"][f"question_{q_num}"] = (
+                standard_country_data["questions"][question_key] = (
                     standard_question_data
                 )
                 
@@ -667,36 +821,36 @@ def run_script(
                 all_evaluated_chunks.extend(standard_chunks)
                 
                 logger.info(
-                    f"[4_RETRIEVE] Question {q_num} for {country_name}: "
+                    f"[4_RETRIEVE] Question {q_item} for {country_name}: "
                     f"{len(standard_chunks)} chunks retrieved (vector)"
                 )
                 
                 # If hop retrieval is requested, also perform hop retrieval
                 if use_hop_retrieval:
-                    logger.info(f"[4_RETRIEVE] Using graph hop retrieval for question {q_num}")
+                    logger.info(f"[4_RETRIEVE] Using graph hop retrieval for question {q_item}")
                     hop_chunks = retrieve_chunks_with_hop(
                         prompt=prompt,
                         top_k=20,
                         country=country_name,
-                        question_number=q_num  # Pass question number to hop retrieval
+                        question_number=q_item if isinstance(q_item, int) else None  # Pass question number to hop retrieval
                     )
                     
                     # Store hop retrieval data
                     hop_question_data = {
-                        "question_number": q_num,
+                        "question_number": q_item if isinstance(q_item, int) else None,
                         "question": prompt,
                         "timestamp": datetime.now().isoformat(),
                         "chunk_count": len(hop_chunks),
                         "top_k_chunks": hop_chunks
                     }
                     
-                    hop_country_data["questions"][f"question_{q_num}"] = hop_question_data
+                    hop_country_data["questions"][question_key] = hop_question_data
                     
                     # Add hop chunks to overall collection as well
                     all_evaluated_chunks.extend(hop_chunks)
                     
                     logger.info(
-                        f"[4_RETRIEVE] Question {q_num} for {country_name}: "
+                        f"[4_RETRIEVE] Question {q_item} for {country_name}: "
                         f"{len(hop_chunks)} chunks retrieved (hop)"
                     )
             
@@ -786,8 +940,8 @@ if __name__ == "__main__":
         description='Run the retrieval script with a specified question number.'
     )
     parser.add_argument(
-        '--question', type=int, choices=range(1, 9),
-        help='Question number (1-8) to select a predefined prompt.'
+        '--question', type=str,
+        help='Question number (1-8) for predefined prompts OR custom question text.'
     )
     parser.add_argument(
         '--country', type=str,
@@ -799,7 +953,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     run_script(
-        question_number=args.question,
+        question=args.question,
         country=args.country,
         use_hop_retrieval=args.hop
     )

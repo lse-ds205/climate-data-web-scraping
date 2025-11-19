@@ -1,0 +1,52 @@
+{
+  "version": "1.0",
+  "description": "Entity management configuration for RAG pipeline",
+  "settings": {
+    "auto_reload": true,
+    "case_sensitive": false,
+    "fuzzy_matching": false
+  },
+  "entity_types": {
+    "country": {
+      "enabled": true,
+      "priority": 3,
+      "data_file": "countries.json",
+      "aliases_file": "country_aliases.json",
+      "description": "Countries and territories for geographic filtering",
+      "metadata_fields": ["income_group", "document_type"]
+    },
+    "company": {
+      "enabled": true,
+      "priority": 2,
+      "data_file": "companies.json", 
+      "aliases_file": "company_aliases.json",
+      "description": "Companies and corporations with sector and geography metadata",
+      "metadata_fields": ["sector", "headquarters_country", "document_type"]
+    },
+    "bank": {
+      "enabled": true,
+      "priority": 2,
+      "data_file": "banks.json",
+      "aliases_file": "bank_aliases.json",
+      "description": "Banks and financial institutions with geography metadata",
+      "metadata_fields": ["headquarters_country", "document_type"]
+    }
+  },
+  "data_sources": {
+    "local_files": {
+      "enabled": true,
+      "path": "data/entities/",
+      "description": "Local JSON files for entity data"
+    },
+    "database": {
+      "enabled": false,
+      "table": "entities",
+      "description": "Database table for entity storage (future feature)"
+    },
+    "api": {
+      "enabled": false,
+      "endpoint": "https://api.example.com/entities",
+      "description": "External API for entity data (future feature)"
+    }
+  }
+}

@@ -10,8 +10,9 @@ logs/
 .vscode/
 .idea/
 
-# JSON files
+# JSON files (but allow entity management JSON files)
 *.json
+!data/entities/*.json
 
 # Database files
 *.db
@@ -26,9 +27,14 @@ logs/
 *.feather
 *.npz
 *.npy
+*.xlsx
 
-# Data folder - contains PDFs
-data/
+# Data folder - contains PDFs (but allow entity management files)
+# Note: exceptions must come before the general rule
+!data/entities/
+!data/entities/*.json
+data/*
+!data/entities
 
 # Logs - ignore all log files and log directories anywhere in the project
 logs/
@@ -52,3 +58,6 @@ __pycache__/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Docker data (local development only)
+.docker-data/

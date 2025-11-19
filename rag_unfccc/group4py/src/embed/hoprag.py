@@ -173,7 +173,13 @@ class OptimizedRelationshipDetector:
                 0.4 * pattern_strength
             )
         
-        return min(confidence, 1.0)
+        # Ensure confidence is never None or invalid
+        if confidence is None or confidence < 0.0:
+            confidence = 0.1  # Default minimum confidence
+        elif confidence > 1.0:
+            confidence = 1.0
+        
+        return confidence
 
 class HopRAGGraphProcessor:
     """Optimized graph processor with consistent UUID handling"""
@@ -469,12 +475,19 @@ class HopRAGGraphProcessor:
         relationship_orms = []
         for rel in relationships:
             try:
+                # Ensure confidence is never None or invalid
+                confidence_value = rel.confidence
+                if confidence_value is None or confidence_value < 0.0:
+                    confidence_value = 0.1  # Default minimum confidence
+                elif confidence_value > 1.0:
+                    confidence_value = 1.0
+                
                 relationship_orm = LogicalRelationshipORM(
                     id=uuid.uuid4(),
                     source_chunk_id=rel.source_id,  # Direct UUID usage
                     target_chunk_id=rel.target_id,  # Direct UUID usage
                     relationship_type=rel.relationship_type,
-                    confidence=float(rel.confidence),
+                    confidence=float(confidence_value),
                     evidence=rel.evidence,
                     method=rel.method
                 )

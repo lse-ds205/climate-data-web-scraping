@@ -1,0 +1,35 @@
+/*
+  This file defines an outline for bank entities used by the system.
+  It does NOT contain real bank data.
+
+  How to use:
+    - When reading bank data from external sources, populate this file with real values in the format below.
+    - Each bank should be represented as a JSON object with the following fields:
+        - "name": (string) The official bank name.
+        - "aliases": (array of strings) Common alternative names (acronyms, abbreviations, etc.).
+        - "headquarters_country": (string) The country where the bank is headquartered.
+
+  Example (these values are placeholders only!):
+*/
+
+[
+  {
+    "name": "BANK_NAME_1",
+    "aliases": ["BankAlias1", "BankPlaceholder1"],
+    "headquarters_country": "ExampleCountry"
+  },
+  {
+    "name": "BANK_NAME_2",
+    "aliases": ["BankAlias2", "BankPlaceholder2"],
+    "headquarters_country": "DemoCountry"
+  },
+  {
+    "name": "BANK_NAME_3",
+    "aliases": ["Bank3Short", "B3"],
+    "headquarters_country": "SampleNation"
+  }
+  // Add more bank objects here as needed
+]
+
+// To load real data, simply update or overwrite this file using a script or data import process.
+// Code that loads banks can expect this structure and should be able to parse additional banks added as new objects in the array.

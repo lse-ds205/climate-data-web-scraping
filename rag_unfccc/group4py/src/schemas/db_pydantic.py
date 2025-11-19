@@ -21,6 +21,7 @@ class NDCDocumentModel(BaseModel):
     download_error: Optional[str] = None
     download_attempts: int = 0
     extracted_text: Optional[str] = None
+    document_type: Optional[str] = None  # KEY METADATA: NDC, BTR, LTS, Law, Policy, Sustainability Report, etc.
     chunks: Optional[List[Dict[str, Any]]] = None
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()

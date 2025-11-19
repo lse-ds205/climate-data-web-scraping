@@ -166,7 +166,9 @@ def remove_gibberish(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         
         # Check for severe corruption that should cause chunk rejection
         if is_severely_corrupted(text):
-            logger.warning(f"Rejecting severely corrupted chunk: {text[:50]}...")
+            # Safely truncate text for logging, handling non-ASCII characters
+            safe_text = text[:50].encode('ascii', 'replace').decode('ascii')
+            logger.warning(f"Rejecting severely corrupted chunk: {safe_text}...")
             continue
         
         # Clean up the text
@@ -423,12 +425,22 @@ def is_severely_corrupted(text: str) -> bool:
         return True
     
     # Check for strings that are mostly non-alphabetic, but be more lenient
-    # Include accented characters and common punctuation
-    legit_char_pattern = r'[a-zA-Z0-9àáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞß\s.,;:!?()\-\'"]'
+    # Include accented characters, common punctuation, and major script families
+    # This pattern includes: Latin, Cyrillic, Greek, Arabic, Chinese, Japanese, Korean, etc.
+    legit_char_pattern = r'[a-zA-Z0-9àáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞß\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F\u1C80-\u1C88\u1D2B\u1D78\uA69F\u1C80-\u1C88\u1D2B\u1D78\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u4E00-\u9FFF\u3400-\u4DBF\u20000-\u2A6DF\u2A700-\u2B73F\u2B740-\u2B81F\u2B820-\u2CEAF\uF900-\uFAFF\u2F800-\u2FA1F\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\u0370-\u03FF\u1F00-\u1FFF\s.,;:!?()\-\'"]'
     legit_chars = len(re.findall(legit_char_pattern, text))
     
-    if len(text) > 20 and (legit_chars / len(text)) < 0.4:  # Lowered from 0.7 to 0.4
-        return True
+    # Only apply this check if the text is mostly ASCII/Latin characters
+    # For non-Latin scripts, we'll be more lenient
+    ascii_ratio = len(re.findall(r'[a-zA-Z0-9\s.,;:!?()\-\'"]', text)) / len(text) if len(text) > 0 else 0
+    
+    if len(text) > 20:
+        if ascii_ratio > 0.8:  # Mostly ASCII/Latin text
+            if (legit_chars / len(text)) < 0.4:
+                return True
+        else:  # Non-Latin script - be more lenient
+            if (legit_chars / len(text)) < 0.2:
+                return True
     
     # Check for excessive Unicode replacement characters
     if text.count('�') + text.count('\ufffd') > 5:
