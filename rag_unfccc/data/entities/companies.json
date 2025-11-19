@@ -1,0 +1,32 @@
+/*
+  This file defines the outline for company entities used in the system.
+  It does NOT contain real company data. 
+
+  How to use:
+    - When reading company data from external sources, populate this file with real values using the outlined format below.
+    - Each company should be represented as an object with the following fields:
+        - "name": (string) The official company name.
+        - "aliases": (array of strings) Common alternative names (brand names, abbreviations, ticker symbols, etc.).
+        - "sector": (string) The main TPI Centre sectoral classificaiton (e.g., "Technology", "Energy", "Media").
+        - "headquarters_country": (string) The country where the company is headquartered.
+# can think of other metadata fields later like unique identifier for the company
+
+  Example (values below are placeholders only!):
+*/
+
+[
+  {
+    "name": "COMPANY_NAME_1",
+    "aliases": ["Alias1", "Ticker1"],
+    "sector": "ExampleSector",
+    "headquarters_country": "ExampleCountry"
+  },
+  {
+    "name": "COMPANY_NAME_2",
+    "aliases": ["Alias2", "Ticker2"],
+    "sector": "AnotherSector",
+    "headquarters_country": "AnotherCountry"
+  }
+  // Add more company objects here as needed
+]
+
