@@ -31,13 +31,44 @@ def check_document_processed(session, doc_id: str) -> tuple[bool, Optional[NDCDo
     try:
         # Convert string doc_id to UUID using deterministic UUID5 - SAME AS PROCESSING CODE
         doc_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, doc_id)
-        document = session.query(NDCDocumentORM).filter(NDCDocumentORM.doc_id == doc_uuid).first()
-        if document:
-            # Check if document has been processed (has processed_at timestamp)
-            is_processed = document.processed_at is not None
-            return is_processed, document
+        
+        # Check if we're using Docker proxy (which only supports raw SQL)
+        from databases.docker_proxy import DockerProxyConnection
+        if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+            # Use raw SQL for Docker proxy
+            result = session.execute(text("""
+                SELECT doc_id, country, title, url, language, submission_date, 
+                       scraped_at, processed_at, updated_at
+                FROM documents 
+                WHERE doc_id = :doc_uuid
+                LIMIT 1
+            """), {'doc_uuid': str(doc_uuid)})
+            row = result.fetchone()
+            if row:
+                # Manually create NDCDocumentORM object from row data
+                document = NDCDocumentORM()
+                document.doc_id = uuid.UUID(row[0]) if isinstance(row[0], str) else row[0]
+                document.country = row[1]
+                document.title = row[2]
+                document.url = row[3]
+                document.language = row[4]
+                document.submission_date = row[5]
+                document.scraped_at = row[6]
+                document.processed_at = row[7]
+                document.updated_at = row[8]
+                is_processed = document.processed_at is not None
+                return is_processed, document
+            else:
+                return False, None
         else:
-            return False, None
+            # Use ORM for regular connections
+            document = session.query(NDCDocumentORM).filter(NDCDocumentORM.doc_id == doc_uuid).first()
+            if document:
+                # Check if document has been processed (has processed_at timestamp)
+                is_processed = document.processed_at is not None
+                return is_processed, document
+            else:
+                return False, None
     finally:
         session.close()
 
@@ -68,28 +99,106 @@ def upload(session, items: List, table: str = None) -> bool:
                             f"source={first_item.source_chunk_id} (type: {type(first_item.source_chunk_id)}), "
                             f"target={first_item.target_chunk_id} (type: {type(first_item.target_chunk_id)})")
         
-        for i, item in enumerate(items):
-            try:
-                # Validate UUID fields for LogicalRelationshipORM
-                if hasattr(item, 'source_chunk_id'):
-                    # Ensure all UUID fields are proper UUID objects
-                    if isinstance(item.id, str):
-                        item.id = uuid.UUID(item.id)
-                    if isinstance(item.source_chunk_id, str):
-                        item.source_chunk_id = uuid.UUID(item.source_chunk_id)
-                    if isinstance(item.target_chunk_id, str):
-                        item.target_chunk_id = uuid.UUID(item.target_chunk_id)
-                
-                session.add(item)
-                
-            except Exception as item_error:
-                logger.error(f"Error adding item {i}: {item_error}")
-                # Skip this item and continue
-                continue
+        # Check if we're using Docker proxy (which only supports raw SQL)
+        from databases.docker_proxy import DockerProxyConnection
+        from databases.models import DocChunkORM, LogicalRelationshipORM
         
-        session.commit()
-        logger.info(f"Successfully uploaded {len(items)} items to database")
-        return True
+        if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+            # Use raw SQL for Docker proxy
+            logger.debug("Using raw SQL for upload (Docker proxy mode)")
+            
+            for i, item in enumerate(items):
+                try:
+                    # Determine item type and use appropriate INSERT SQL
+                    if isinstance(item, NDCDocumentORM):
+                        session.execute(text("""
+                            INSERT INTO documents (doc_id, country, title, url, language, submission_date, scraped_at, processed_at, updated_at)
+                            VALUES (:doc_id, :country, :title, :url, :language, :submission_date, :scraped_at, :processed_at, :updated_at)
+                        """), {
+                            'doc_id': str(item.doc_id),
+                            'country': item.country,
+                            'title': item.title,
+                            'url': item.url,
+                            'language': item.language,
+                            'submission_date': item.submission_date,
+                            'scraped_at': item.scraped_at or datetime.now(),
+                            'processed_at': item.processed_at,
+                            'updated_at': item.updated_at or datetime.now()
+                        })
+                    elif isinstance(item, DocChunkORM):
+                        session.execute(text("""
+                            INSERT INTO doc_chunks (id, doc_id, chunk_index, page, content, transformer_embedding, word2vec_embedding, created_at)
+                            VALUES (:id, :doc_id, :chunk_index, :page, :content, :transformer_embedding, :word2vec_embedding, :created_at)
+                        """), {
+                            'id': str(item.id),
+                            'doc_id': str(item.doc_id),
+                            'chunk_index': item.chunk_index,
+                            'page': getattr(item, 'page', None),
+                            'content': item.content,
+                            'transformer_embedding': getattr(item, 'transformer_embedding', None),
+                            'word2vec_embedding': getattr(item, 'word2vec_embedding', None),
+                            'created_at': getattr(item, 'created_at', None) or datetime.now()
+                        })
+                    elif isinstance(item, LogicalRelationshipORM):
+                        # Validate UUIDs
+                        item_id = str(item.id) if not isinstance(item.id, str) else item.id
+                        source_id = str(item.source_chunk_id) if not isinstance(item.source_chunk_id, str) else item.source_chunk_id
+                        target_id = str(item.target_chunk_id) if not isinstance(item.target_chunk_id, str) else item.target_chunk_id
+                        
+                        # Ensure confidence is never None or invalid
+                        confidence_value = getattr(item, 'confidence', None)
+                        if confidence_value is None or confidence_value < 0.0:
+                            confidence_value = 0.1  # Default minimum confidence
+                        elif confidence_value > 1.0:
+                            confidence_value = 1.0
+                        
+                        session.execute(text("""
+                            INSERT INTO logical_relationships (id, source_chunk_id, target_chunk_id, relationship_type, confidence, evidence, method, created_at)
+                            VALUES (:id, :source_chunk_id, :target_chunk_id, :relationship_type, :confidence, :evidence, :method, :created_at)
+                        """), {
+                            'id': item_id,
+                            'source_chunk_id': source_id,
+                            'target_chunk_id': target_id,
+                            'relationship_type': item.relationship_type,
+                            'confidence': confidence_value,
+                            'evidence': getattr(item, 'evidence', None),
+                            'method': getattr(item, 'method', 'rule_based'),
+                            'created_at': item.created_at or datetime.now()
+                        })
+                    else:
+                        logger.warning(f"Unknown item type: {type(item).__name__}, skipping")
+                        
+                except Exception as item_error:
+                    logger.error(f"Error adding item {i} of type {type(item).__name__}: {item_error}")
+                    continue
+            
+            session.commit()
+            logger.info(f"Successfully uploaded {len(items)} items to database")
+            return True
+        else:
+            # Use ORM for regular connections
+            for i, item in enumerate(items):
+                try:
+                    # Validate UUID fields for LogicalRelationshipORM
+                    if hasattr(item, 'source_chunk_id'):
+                        # Ensure all UUID fields are proper UUID objects
+                        if isinstance(item.id, str):
+                            item.id = uuid.UUID(item.id)
+                        if isinstance(item.source_chunk_id, str):
+                            item.source_chunk_id = uuid.UUID(item.source_chunk_id)
+                        if isinstance(item.target_chunk_id, str):
+                            item.target_chunk_id = uuid.UUID(item.target_chunk_id)
+                    
+                    session.add(item)
+                    
+                except Exception as item_error:
+                    logger.error(f"Error adding item {i}: {item_error}")
+                    # Skip this item and continue
+                    continue
+            
+            session.commit()
+            logger.info(f"Successfully uploaded {len(items)} items to database")
+            return True
         
     except Exception as e:
         session.rollback()
@@ -123,16 +232,33 @@ def update_processed(session, model_class, doc_id: str, chunks=None, table: str 
         try:
             # Convert string doc_id to UUID using deterministic UUID5 - SAME AS PROCESSING CODE
             doc_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, doc_id)
-            document = session.query(model_class).filter(model_class.doc_id == doc_uuid).first()
-            if document:
-                document.processed_at = datetime.now()
-                if chunks:
-                    # Optionally store chunk count or other metadata
-                    pass
+            
+            # Check if we're using Docker proxy (which only supports raw SQL)
+            from databases.docker_proxy import DockerProxyConnection
+            if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+                # Use raw SQL for Docker proxy
+                result = session.execute(text("""
+                    UPDATE documents
+                    SET processed_at = :processed_at
+                    WHERE doc_id = :doc_uuid
+                """), {
+                    'processed_at': datetime.now(),
+                    'doc_uuid': str(doc_uuid)
+                })
                 session.commit()
                 logger.info(f"Updated processed status for document {doc_id}")
             else:
-                logger.warning(f"Document {doc_id} not found for update")
+                # Use ORM for regular connections
+                document = session.query(model_class).filter(model_class.doc_id == doc_uuid).first()
+                if document:
+                    document.processed_at = datetime.now()
+                    if chunks:
+                        # Optionally store chunk count or other metadata
+                        pass
+                    session.commit()
+                    logger.info(f"Updated processed status for document {doc_id}")
+                else:
+                    logger.warning(f"Document {doc_id} not found for update")
         except Exception as e:
             session.rollback()
             logger.error(f"Error updating processed status for {doc_id}: {e}")
@@ -184,10 +310,29 @@ class LLMResponseUploader:
             'missing_questions': []
         }
         
-        # Check if country exists
-        result = session.execute(text("SELECT id FROM countries WHERE id = :country"), 
-                               {"country": country_name})
-        validation_results['country_exists'] = result.fetchone() is not None
+        # Check if country exists using entity system (primary) or database (fallback)
+        try:
+            from group4py.src.constants.entities import EntityManager, EntityType
+            from pathlib import Path
+            
+            # Get the config directory
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent.parent.parent
+            config_dir = project_root / "data" / "entities"
+            
+            # Create EntityManager and check country
+            entity_manager = EntityManager(config_dir=config_dir, load_all=False)
+            entity_config = entity_manager._configs.get(EntityType.COUNTRY)
+            if entity_config and entity_config.enabled:
+                entity_manager._load_entity_type(EntityType.COUNTRY, entity_config)
+            
+            countries = entity_manager.get_entities_by_type(EntityType.COUNTRY)
+            validation_results['country_exists'] = country_name in countries
+        except Exception:
+            # Fallback to database check
+            result = session.execute(text("SELECT id FROM countries WHERE id = :country"), 
+                                   {"country": country_name})
+            validation_results['country_exists'] = result.fetchone() is not None
         
         # Check which questions exist
         for q_num in question_numbers:

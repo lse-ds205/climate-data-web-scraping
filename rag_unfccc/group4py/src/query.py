@@ -42,9 +42,11 @@ class ChunkFormatter:
         formatted_chunks = []
         
         for i, chunk in enumerate(chunks, 1):
+            # Use index (0-based) as the ID for LLM to reference
+            # This ensures citations can be matched back to original_chunks by index
             chunk_text = f"""
                 CHUNK {i}:
-                ID: {chunk.get('id', 'N/A')}
+                ID: {i - 1}
                 Document: {chunk.get('doc_id', 'N/A')}
                 Country: {chunk.get('country', 'N/A')}
                 Content: {chunk.get('content', 'N/A')}
@@ -253,26 +255,42 @@ class ResponseProcessor:
     def _validate_citations(response_data: Dict[str, Any], original_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Validate and enrich citations with original chunk data."""
         try:
-            # Create lookup dict for original chunks
-            chunk_lookup = {chunk['id']: chunk for chunk in original_chunks}
+            # Create lookup dicts for original chunks by both ID (UUID) and index
+            # Chunks are shown to LLM with index (0, 1, 2...) but may have UUID IDs
+            chunk_lookup_by_id = {str(chunk['id']): chunk for chunk in original_chunks}
+            chunk_lookup_by_index = {i: chunk for i, chunk in enumerate(original_chunks)}
             
             validated_citations = []
             
             for citation in response_data['citations']:
                 chunk_id = citation.get('id')
+                original_chunk = None
                 
-                if chunk_id in chunk_lookup:
+                # Try to find by index first (most common case - LLM uses 0, 1, 2...)
+                if isinstance(chunk_id, int) and 0 <= chunk_id < len(original_chunks):
+                    original_chunk = chunk_lookup_by_index[chunk_id]
+                # Try to find by UUID string
+                elif chunk_id in chunk_lookup_by_id:
+                    original_chunk = chunk_lookup_by_id[chunk_id]
+                # Try to find by UUID string conversion
+                elif str(chunk_id) in chunk_lookup_by_id:
+                    original_chunk = chunk_lookup_by_id[str(chunk_id)]
+                
+                if original_chunk:
                     # Use original chunk data and add how_used from LLM
-                    original_chunk = chunk_lookup[chunk_id].copy()
+                    enriched_chunk = original_chunk.copy()
                     
                     # Rename similarity_score to cos_similarity_score if needed
-                    if 'similarity_score' in original_chunk:
-                        original_chunk['cos_similarity_score'] = original_chunk.pop('similarity_score')
+                    if 'similarity_score' in enriched_chunk:
+                        enriched_chunk['cos_similarity_score'] = enriched_chunk.pop('similarity_score')
                     
                     # Add how_used from LLM response
-                    original_chunk['how_used'] = citation.get('how_used', 'No explanation provided')
+                    enriched_chunk['how_used'] = citation.get('how_used', 'No explanation provided')
                     
-                    validated_citations.append(original_chunk)
+                    # Ensure citation ID matches what was requested (for consistency)
+                    enriched_chunk['id'] = chunk_id
+                    
+                    validated_citations.append(enriched_chunk)
                 else:
                     logger.warning(f"Citation references unknown chunk ID: {chunk_id}")
                     # Keep the citation as-is even if we can't validate it
@@ -340,7 +358,7 @@ class ConfidenceClassification:
             retrieve_data: The retrieval data used to generate the response
             
         Returns:
-            Updated response with confidence band added
+            Updated response with confidence band and numeric confidence added
         """
         # Deep copy to avoid modifying original
         result = llm_response.copy()
@@ -350,29 +368,32 @@ class ConfidenceClassification:
             # Get corresponding retrieval data
             retrieve_q_data = retrieve_data.get("questions", {}).get(q_key, {})
             
-            # Calculate confidence band based on retrieval scores
-            confidence_band = self._calculate_confidence_band(retrieve_q_data)
+            # Calculate confidence band and numeric confidence based on retrieval scores
+            confidence_band, confidence_score = self._calculate_confidence_band_and_score(retrieve_q_data)
             
-            # Add confidence band to response
+            # Add confidence band and numeric confidence to response
             q_data["confidence_band"] = confidence_band
+            q_data["confidence"] = confidence_score
         
         return result
     
-    def _calculate_confidence_band(self, question_data: Dict[str, Any]) -> str:
+    def _calculate_confidence_band_and_score(self, question_data: Dict[str, Any]) -> Tuple[str, float]:
         """
-        Calculate confidence band based on retrieval scores.
+        Calculate confidence band and numeric confidence score based on retrieval scores.
         
         Args:
             question_data: Question data from retrieval
             
         Returns:
-            Confidence band: "High", "Average", or "Low"
+            Tuple of (confidence_band: str, confidence_score: float)
+            confidence_band: "High", "Average", or "Low"
+            confidence_score: Numeric value between 0.0 and 1.0
         """
         # Extract scores from both traditional and hoprag methods
         scores = self._extract_scores(question_data)
         
         if not scores or not scores.get("chunks", []):
-            return "Low"  # No scores available
+            return ("Low", 0.0)  # No scores available
         
         # Calculate average scores across top chunks (up to 5)
         top_chunks = scores.get("chunks", [])[:5]
@@ -384,22 +405,50 @@ class ConfidenceClassification:
             "fuzzy_score": sum(c.get("fuzzy_score", 0) for c in top_chunks) / len(top_chunks) if top_chunks else 0
         }
         
+        # Calculate numeric confidence score (0.0-1.0) based on weighted average of scores
+        # Use the same weights as in the combined_score calculation
+        # Normalize each score to 0-1 range and take weighted average
+        confidence_score = (
+            0.4 * min(1.0, avg_scores["combined_score"]) +
+            0.3 * min(1.0, avg_scores["similarity_score"]) +
+            0.2 * min(1.0, avg_scores["regex_score"]) +
+            0.1 * min(1.0, avg_scores["fuzzy_score"])
+        )
+        
+        # Ensure confidence is between 0.0 and 1.0
+        confidence_score = max(0.0, min(1.0, confidence_score))
+        
+        # Determine confidence band
         # Check if scores meet high confidence thresholds
         if (avg_scores["combined_score"] >= self.thresholds["high"]["combined_score"] and 
             (avg_scores["similarity_score"] >= self.thresholds["high"]["similarity_score"] or 
              avg_scores["regex_score"] >= self.thresholds["high"]["regex_score"] or
              avg_scores["fuzzy_score"] >= self.thresholds["high"]["fuzzy_score"])):
-            return "High"
+            return ("High", confidence_score)
         
         # Check if scores meet average confidence thresholds
         if (avg_scores["combined_score"] >= self.thresholds["average"]["combined_score"] and 
             (avg_scores["similarity_score"] >= self.thresholds["average"]["similarity_score"] or 
              avg_scores["regex_score"] >= self.thresholds["average"]["regex_score"] or
              avg_scores["fuzzy_score"] >= self.thresholds["average"]["fuzzy_score"])):
-            return "Average"
+            return ("Average", confidence_score)
         
         # Default to low confidence
-        return "Low"
+        return ("Low", confidence_score)
+    
+    def _calculate_confidence_band(self, question_data: Dict[str, Any]) -> str:
+        """
+        Calculate confidence band based on retrieval scores.
+        Legacy method for backward compatibility.
+        
+        Args:
+            question_data: Question data from retrieval
+            
+        Returns:
+            Confidence band: "High", "Average", or "Low"
+        """
+        confidence_band, _ = self._calculate_confidence_band_and_score(question_data)
+        return confidence_band
     
     def _extract_scores(self, question_data: Dict[str, Any]) -> Dict[str, Any]:
         """

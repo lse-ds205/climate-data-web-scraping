@@ -1,0 +1,218 @@
+[
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Australia",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:30:19.370256"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Brazil",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:30:58.608615"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Barbados",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:31:39.620105"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Sri Lanka",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:32:18.111979"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Uruguay",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:32:58.130795"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Costa Rica",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:33:34.975510"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Dominican Republic",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:34:13.198336"
+  },
+  {
+    "question": "Does the country have a net-zero target?",
+    "country": "Ecuador",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:34:52.335174"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Australia",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:35:30.721540"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Brazil",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:36:10.017002"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Barbados",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:36:47.846802"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Sri Lanka",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:37:26.022443"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Uruguay",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:38:04.389006"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Costa Rica",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:38:41.317589"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Dominican Republic",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:39:18.979912"
+  },
+  {
+    "question": "What does the country promise as their 2030/2035 NDC target?",
+    "country": "Ecuador",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:39:56.037963"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Australia",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:40:32.805476"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Brazil",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:41:12.386082"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Barbados",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:41:51.143730"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Sri Lanka",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:42:30.165028"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Uruguay",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:43:09.699118"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Costa Rica",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:43:54.081910"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Dominican Republic",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:44:36.574053"
+  },
+  {
+    "question": "What policies or strategies does the country propose to meet its targets?",
+    "country": "Ecuador",
+    "status": "no_file",
+    "chunks_retrieved": 0,
+    "file_path": null,
+    "chunk_previews": [],
+    "timestamp": "2025-10-24T16:45:17.258868"
+  }
+]

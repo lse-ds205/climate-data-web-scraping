@@ -28,7 +28,7 @@ For more details about the project architecture and design decisions, please ref
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.10+ (requirements.txt packages has a rust issue with Python 3.14 as of 22/10/2025 - if still an issue fallback to python v3.12)
 - PostgreSQL with pgvector extension
 - Tesseract OCR (for PDF extraction)
 - Docker (recommended for database setup if you intend to run locally)
@@ -49,12 +49,12 @@ For more details about the project architecture and design decisions, please ref
    pip install -r requirements/requirements.txt
    ```
  
-3. **Set up Supabase account**
+3. **Set up Supabase account** ## not necessary at this stage of the project
    - Create a new Supabase project at [supabase.com](https://supabase.com)
    - Set up an Edge Function named `send-email`
    - Save your Supabase URL and API keys
 
-4. **Set up Resend API**
+4. **Set up Resend API** ## not necessary at this stage of the project
    - Create an account at [resend.com](https://resend.com)
    - Generate an API key
    - Verify a domain for sending emails
@@ -62,6 +62,7 @@ For more details about the project architecture and design decisions, please ref
 5. **Set up LLM API**
    - Create an account with a compatible LLM provider (Meta, Nebius, OpenAI, etc.)
    - Generate an API key
+   - I have been using nebuis 
 
 6. **Database setup**
    - Use Docker to set up PostgreSQL with pgvector:
@@ -81,17 +82,20 @@ For more details about the project architecture and design decisions, please ref
      python sql/setup_database.py
      ```
    
-   **⚠️ Windows Users: Database Connection**
+   **⚠️ Windows Users: Database Connection Workaround**
    
-   The system includes an **automatic Docker proxy workaround** for Windows users. When it detects you're running on Windows with a local Docker container, it automatically uses `docker exec` for database queries instead of direct network connections. This happens transparently - no configuration needed!
+   Windows Docker Desktop has networking issues that prevent direct PostgreSQL connections. The system includes **two workarounds**:
    
-   For initial database setup, use the PowerShell script:
-   ```powershell
-   # Windows only - runs SQL files directly inside the Docker container
-   .\run_sql_in_docker.ps1
-   ```
+   1. **Automatic runtime workaround**: The system automatically detects Windows + local Docker and uses `docker exec` for all database queries. This happens transparently - no configuration needed! The proxy (`group4py/src/databases/docker_proxy.py`) handles this automatically.
    
-   **How it works**: The proxy (`databases/docker_proxy.py`) detects Windows + local Docker and routes all SQL queries through `docker exec`, bypassing Windows Docker Desktop networking issues. When deployed to production (Linux server or remote database), it automatically uses direct connections.
+   2. **Initial setup workaround**: For initial database setup, use the PowerShell script:
+      ```powershell
+      # Windows only - runs SQL files directly inside the Docker container
+      .\scripts\run_sql_in_docker.ps1
+      ```
+      This script runs all SQL schema files (`sql/*.sql`) inside the Docker container, bypassing Windows networking issues.
+   
+   **Note**: This is a workaround for Windows Docker Desktop. On Linux or with remote databases, the system uses direct connections automatically. See Issue #2 in `Issues_tracking/KNOWN_ISSUES.md` for details.
  
 7. **Configure environment variables**
    - Create a `.env` file in the project root directory based on the example in the repository
@@ -135,6 +139,29 @@ For more detailed setup instructions, please refer to [CONTRIBUTING.md](CONTRIBU
 
 ## 📋 Usage Guide
 
+### Testing the System
+
+Before running the full pipeline, test the system components:
+
+1. **Test LLM Connection** (First step - verify API is configured)
+   ```bash
+   python tests/test_llm_connection.py
+   ```
+
+2. **Test Retrieval System**
+   ```bash
+   python tests/test_retrieval.py --single
+   ```
+
+3. **Test Full Pipeline** (Retrieval + LLM)
+   ```bash
+   python tests/test_llm_single.py --single
+   ```
+
+See [`tests/README.md`](tests/README.md) and [`TESTING_GUIDE.md`](TESTING_GUIDE.md) for more details.
+
+### Running the Pipeline
+
 The system consists of multiple components that can be run individually or as part of the automated pipeline:
 
 1. **Document Scraping**
@@ -156,7 +183,7 @@ The system consists of multiple components that can be run individually or as pa
 
 4. **Query Processing**
    ```bash
-   python entrypoints/4_retrieve.py --question 1 --country "Japan" --hop
+   python entrypoints/4_retrieve.py --question "Your question" --country "Country Name"
    ```
 
 5. **LLM Response Generation**
@@ -175,6 +202,8 @@ The system consists of multiple components that can be run individually or as pa
    ```
 
 For detailed information about each script and its specific arguments, please refer to the documentation in the `docs/` directory.
+
+See [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md) for a complete overview of the project organization.
 
 ### Automated Operation
 
@@ -234,11 +263,42 @@ flowchart TD
 ```
 
 
+## 📚 System Documentation
+
+**New to the codebase?** Start here:
+
+### Core System Documentation
+
+- **[`docs/SYSTEM_OVERVIEW.md`](docs/SYSTEM_OVERVIEW.md)** - **START HERE**: Complete system architecture, design principles, and extension strategy
+- **[`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md)** - Directory structure and file organization
+- **[`docs/BATCH_PROCESSING_GUIDE.md`](docs/BATCH_PROCESSING_GUIDE.md)** - Guide to batch processing multiple entities
+- **[`docs/entity_management.md`](docs/entity_management.md)** - Entity management system documentation
+
+### Component Documentation
+
+Detailed documentation for each pipeline stage:
+- [`docs/1_scrape.md`](docs/1_scrape.md) - Document scraping from UNFCCC
+- [`docs/2_chunk.md`](docs/2_chunk.md) - Text extraction and chunking
+- [`docs/3_embed.md`](docs/3_embed.md) - Embedding generation
+- [`docs/4_retrieve.md`](docs/4_retrieve.md) - Chunk retrieval and similarity search
+- [`docs/5_llm_response.md`](docs/5_llm_response.md) - LLM response generation
+- [`docs/6_output.md`](docs/6_output.md) - CSV/Excel output generation
+- [`docs/7_send_email.md`](docs/7_send_email.md) - Email notification system
+- [`docs/db_schema.md`](docs/db_schema.md) - Database schema documentation
+
+### Key Extension Points
+
+- **Adding Prompts**: See "Adding New Prompts" section in [`docs/SYSTEM_OVERVIEW.md`](docs/SYSTEM_OVERVIEW.md#adding-new-prompts)
+- **Adding Entities**: Edit `data/entities/*.json` files (see [`docs/entity_management.md`](docs/entity_management.md))
+- **Batch Processing**: Use `entrypoints/batch_process.py` with TPI Centre IDs (see [`docs/BATCH_PROCESSING_GUIDE.md`](docs/BATCH_PROCESSING_GUIDE.md))
+- **Customizing Output**: Modify `entrypoints/6_output.py` (see Issue #4 in [`Issues_tracking/KNOWN_ISSUES.md`](Issues_tracking/KNOWN_ISSUES.md))
+
+
 ## 🤝 Contributing & Known Issues
 
 For information about setting up your development environment and contributing to this project, please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Known bugs and planned improvements** are tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). If you encounter a new issue or have suggestions for improvements, please check this file first or open a new issue on GitHub.
+**Known bugs and planned improvements** are tracked in [`Issues_tracking/KNOWN_ISSUES.md`](Issues_tracking/KNOWN_ISSUES.md). If you encounter a new issue or have suggestions for improvements, please check this file first or open a new issue on GitHub.
 
 ## 📞 Support
 

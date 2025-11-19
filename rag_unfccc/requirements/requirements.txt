@@ -10,6 +10,7 @@ python-multipart==0.0.20
 python-oxmsg==0.0.2
 pytz==2025.2
 PyYAML==6.0.2
+rich==13.9.4  # Pretty terminal output for inspect_chunks.py
 StrEnum==0.4.15
 
 # Async/IO libraries
@@ -116,8 +117,8 @@ huggingface-hub==0.31.1
 joblib==1.5.0
 networkx==3.4.2
 numpy==1.26.4
-onnx==1.17.0
-onnxruntime==1.21.1
+onnx==1.16.0  # Pinned for Windows DLL compatibility
+onnxruntime==1.18.1  # Windows: Requires Visual C++ Redistributables (see KNOWN_ISSUES.md)
 openai==1.82.0
 opencv-python==4.11.0.86
 pandas==2.2.3

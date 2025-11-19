@@ -17,13 +17,14 @@ from group4py.src.chunk.extractor import extract_text_from_pdf
 from group4py.src.chunk.chunker import DocChunker
 from group4py.src.constants.settings import FILE_PROCESSING_CONCURRENCY
 from helpers.internal import Logger
-from databases.auth import PostgresConnection
+from databases.docker_proxy import get_database_connection
 from databases.models import NDCDocumentORM, DocChunkORM, LogicalRelationshipORM
 from databases.operations import check_document_processed, update_processed, upload
+from group4py.src.scrape.document_type import infer_document_type
 
 logger = logging.getLogger(__name__)
-db = PostgresConnection()
 load_dotenv()
+db = get_database_connection()  # Use Docker proxy on Windows
 
 
 def get_file_paths():
@@ -80,25 +81,57 @@ async def chunk_file_one(file_path: str, force_reprocess: bool = False):
                     # Convert string doc_id to UUID using deterministic UUID5
                     doc_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, doc_id)
                     
-                    
-                    # First, delete any logical relationships that reference this document's chunks
-                    # Get all chunk IDs for this document using explicit select
-                    chunk_ids_query = select(DocChunkORM.id).filter(DocChunkORM.doc_id == doc_uuid)
-                    
-                    # Delete relationships where either source or target chunk belongs to this document
-                    deleted_relationships = session.query(LogicalRelationshipORM).filter(
-                        (LogicalRelationshipORM.source_chunk_id.in_(chunk_ids_query)) |
-                        (LogicalRelationshipORM.target_chunk_id.in_(chunk_ids_query))
-                    ).delete(synchronize_session=False)
-                    
-                    if deleted_relationships > 0:
-                        logger.info(f"[3_CHUNK] Deleted {deleted_relationships} relationships for document {doc_id}")
-                    
-                    # Now delete the chunks
-                    deleted_chunks = session.query(DocChunkORM).filter(DocChunkORM.doc_id == doc_uuid).delete()
-                    logger.info(f"[3_CHUNK] Removed {deleted_chunks} existing chunks for document {doc_id}")
-                    
-                    session.commit()
+                    # Check if we're using Docker proxy (which only supports raw SQL)
+                    if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+                        # Use raw SQL for Docker proxy
+                        from sqlalchemy import text
+                        
+                        # First, delete any logical relationships that reference this document's chunks
+                        result = session.execute(text("""
+                            DELETE FROM logical_relationships
+                            WHERE source_chunk_id IN (
+                                SELECT id FROM doc_chunks WHERE doc_id = :doc_uuid
+                            )
+                            OR target_chunk_id IN (
+                                SELECT id FROM doc_chunks WHERE doc_id = :doc_uuid
+                            )
+                        """), {'doc_uuid': str(doc_uuid)})
+                        
+                        # Get count of deleted relationships (may not be available in all cases)
+                        deleted_relationships = result.rowcount if hasattr(result, 'rowcount') else 0
+                        
+                        if deleted_relationships > 0:
+                            logger.info(f"[3_CHUNK] Deleted {deleted_relationships} relationships for document {doc_id}")
+                        
+                        # Now delete the chunks
+                        result = session.execute(text("""
+                            DELETE FROM doc_chunks WHERE doc_id = :doc_uuid
+                        """), {'doc_uuid': str(doc_uuid)})
+                        
+                        deleted_chunks = result.rowcount if hasattr(result, 'rowcount') else 0
+                        logger.info(f"[3_CHUNK] Removed {deleted_chunks} existing chunks for document {doc_id}")
+                        
+                        session.commit()
+                    else:
+                        # Use ORM for regular connections
+                        # First, delete any logical relationships that reference this document's chunks
+                        # Get all chunk IDs for this document using explicit select
+                        chunk_ids_query = select(DocChunkORM.id).filter(DocChunkORM.doc_id == doc_uuid)
+                        
+                        # Delete relationships where either source or target chunk belongs to this document
+                        deleted_relationships = session.query(LogicalRelationshipORM).filter(
+                            (LogicalRelationshipORM.source_chunk_id.in_(chunk_ids_query)) |
+                            (LogicalRelationshipORM.target_chunk_id.in_(chunk_ids_query))
+                        ).delete(synchronize_session=False)
+                        
+                        if deleted_relationships > 0:
+                            logger.info(f"[3_CHUNK] Deleted {deleted_relationships} relationships for document {doc_id}")
+                        
+                        # Now delete the chunks
+                        deleted_chunks = session.query(DocChunkORM).filter(DocChunkORM.doc_id == doc_uuid).delete()
+                        logger.info(f"[3_CHUNK] Removed {deleted_chunks} existing chunks for document {doc_id}")
+                        
+                        session.commit()
                 except Exception as e:
                     logger.error(f"[3_CHUNK] Error removing existing chunks and relationships: {e}")
                     logger.error(f"[3_CHUNK] Traceback: {traceback.format_exc()}")
@@ -128,21 +161,76 @@ async def chunk_file_one(file_path: str, force_reprocess: bool = False):
                             logger.warning(f"[3_CHUNK] Could not parse date from filename: {parts[2]}")
                     
                     # Create document record
-                    new_document = NDCDocumentORM(
-                        doc_id=uuid.uuid5(uuid.NAMESPACE_DNS, doc_id),
-                        country=country,
-                        title=f"{country} NDC",
-                        url="",  # Empty URL since we're processing local files
-                        language=language,
-                        submission_date=submission_date,
-                        file_path=file_path,
-                        file_size=Path(file_path).stat().st_size / (1024 * 1024)  # Size in MB
-                    )
+                    doc_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, doc_id)
+                    file_size_mb = Path(file_path).stat().st_size / (1024 * 1024)
                     
-                    session.add(new_document)
-                    session.commit()
-                    logger.info(f"[3_CHUNK] Created document record for {doc_id}")
-                    document = new_document
+                    # Infer document_type from file path (KEY METADATA)
+                    # Don't assume NDC - let inference determine from file path
+                    document_type = infer_document_type(file_path=file_path)
+                    
+                    # Generate title based on inferred document type or use generic format
+                    if document_type:
+                        title = f"{country} {document_type}"
+                    else:
+                        # Fallback: use filename or generic title
+                        file_stem = Path(file_path).stem
+                        title = f"{country} Document" if not file_stem else file_stem.replace('_', ' ')
+                    
+                    # Check if we're using Docker proxy (which only supports raw SQL)
+                    if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+                        # Use raw SQL for Docker proxy
+                        from sqlalchemy import text
+                        from datetime import datetime
+                        
+                        session.execute(text("""
+                            INSERT INTO documents (doc_id, country, title, url, language, submission_date, file_path, file_size, scraped_at, updated_at, document_type)
+                            VALUES (:doc_id, :country, :title, :url, :language, :submission_date, :file_path, :file_size, :scraped_at, :updated_at, :document_type)
+                        """), {
+                            'doc_id': str(doc_uuid),
+                            'country': country,
+                            'title': title,  # Use inferred title, not hardcoded "NDC"
+                            'url': "",
+                            'language': language,
+                            'submission_date': submission_date,
+                            'file_path': file_path,
+                            'file_size': file_size_mb,
+                            'scraped_at': datetime.now(),
+                            'updated_at': datetime.now(),
+                            'document_type': document_type  # KEY METADATA
+                        })
+                        session.commit()
+                        logger.info(f"[3_CHUNK] Created document record for {doc_id} (raw SQL)")
+                        
+                        # Create a temporary document object for tracking
+                        document = NDCDocumentORM(
+                            doc_id=doc_uuid,
+                            country=country,
+                            title=title,  # Use inferred title
+                            url="",
+                            language=language,
+                            submission_date=submission_date,
+                            file_path=file_path,
+                            file_size=file_size_mb,
+                            document_type=document_type  # KEY METADATA
+                        )
+                    else:
+                        # Use ORM for regular connections
+                        new_document = NDCDocumentORM(
+                            doc_id=doc_uuid,
+                            country=country,
+                            title=title,  # Use inferred title, not hardcoded "NDC"
+                            url="",  # Empty URL since we're processing local files
+                            language=language,
+                            submission_date=submission_date,
+                            file_path=file_path,
+                            file_size=file_size_mb,
+                            document_type=document_type  # KEY METADATA
+                        )
+                        
+                        session.add(new_document)
+                        session.commit()
+                        logger.info(f"[3_CHUNK] Created document record for {doc_id}")
+                        document = new_document
                 except Exception as e:
                     logger.error(f"[3_CHUNK] Error creating document record: {e}")
                     session.rollback()
@@ -270,14 +358,93 @@ async def chunk_file_one(file_path: str, force_reprocess: bool = False):
                 logger.error(f"[3_CHUNK] No valid chunks after cleaning for {file_path}")
                 raise ChunkProcessingError(f"No valid chunks after cleaning for {file_path}")
             
-            # 4. Create DocChunk objects for database storage (without embeddings)
-            db_chunks = []
+            # 4. Get document metadata (URL and dates) from database to include in chunk metadata
+            # First, get the doc_uuid (deterministic UUID from filename)
             doc_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, file_name)
+            
+            doc_url = ""
+            doc_metadata = {}  # Store date fields and other metadata
+            
+            try:
+                # Check if we're using Docker proxy (which only supports raw SQL)
+                if hasattr(session, '_DockerProxySession__proxy') or session.__class__.__name__ == 'DockerProxySession':
+                    # Use raw SQL for Docker proxy - get URL and date fields
+                    from sqlalchemy import text
+                    result = session.execute(text("""
+                        SELECT url, submission_date, scraped_at, downloaded_at, processed_at
+                        FROM documents WHERE doc_id = :doc_uuid
+                    """), {'doc_uuid': str(doc_uuid)})
+                    row = result.fetchone()
+                    if row:
+                        doc_url = row[0] or ""
+                        # Add date fields to metadata (convert to ISO format strings for JSON storage)
+                        if row[1]:  # submission_date
+                            doc_metadata['submission_date'] = row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1])
+                        if row[2]:  # scraped_at
+                            doc_metadata['scraped_at'] = row[2].isoformat() if hasattr(row[2], 'isoformat') else str(row[2])
+                        if row[3]:  # downloaded_at
+                            doc_metadata['downloaded_at'] = row[3].isoformat() if hasattr(row[3], 'isoformat') else str(row[3])
+                        if row[4]:  # processed_at
+                            doc_metadata['processed_at'] = row[4].isoformat() if hasattr(row[4], 'isoformat') else str(row[4])
+                else:
+                    # Use ORM for regular connections
+                    if document:
+                        if hasattr(document, 'url') and document.url:
+                            doc_url = document.url
+                        # Get date fields from document object
+                        if hasattr(document, 'submission_date') and document.submission_date:
+                            doc_metadata['submission_date'] = document.submission_date.isoformat() if hasattr(document.submission_date, 'isoformat') else str(document.submission_date)
+                        if hasattr(document, 'scraped_at') and document.scraped_at:
+                            doc_metadata['scraped_at'] = document.scraped_at.isoformat() if hasattr(document.scraped_at, 'isoformat') else str(document.scraped_at)
+                        if hasattr(document, 'downloaded_at') and document.downloaded_at:
+                            doc_metadata['downloaded_at'] = document.downloaded_at.isoformat() if hasattr(document.downloaded_at, 'isoformat') else str(document.downloaded_at)
+                        if hasattr(document, 'processed_at') and document.processed_at:
+                            doc_metadata['processed_at'] = document.processed_at.isoformat() if hasattr(document.processed_at, 'isoformat') else str(document.processed_at)
+                    else:
+                        # Query the document again to get URL and dates
+                        doc_query = session.query(NDCDocumentORM).filter(NDCDocumentORM.doc_id == doc_uuid).first()
+                        if doc_query:
+                            if doc_query.url:
+                                doc_url = doc_query.url
+                            # Get date fields
+                            if doc_query.submission_date:
+                                doc_metadata['submission_date'] = doc_query.submission_date.isoformat() if hasattr(doc_query.submission_date, 'isoformat') else str(doc_query.submission_date)
+                            if doc_query.scraped_at:
+                                doc_metadata['scraped_at'] = doc_query.scraped_at.isoformat() if hasattr(doc_query.scraped_at, 'isoformat') else str(doc_query.scraped_at)
+                            if doc_query.downloaded_at:
+                                doc_metadata['downloaded_at'] = doc_query.downloaded_at.isoformat() if hasattr(doc_query.downloaded_at, 'isoformat') else str(doc_query.downloaded_at)
+                            if doc_query.processed_at:
+                                doc_metadata['processed_at'] = doc_query.processed_at.isoformat() if hasattr(doc_query.processed_at, 'isoformat') else str(doc_query.processed_at)
+            except Exception as e:
+                logger.warning(f"[3_CHUNK] Could not retrieve document metadata for {doc_id}: {e}")
+                doc_url = ""
+                doc_metadata = {}
+            
+            if doc_url or doc_metadata:
+                logger.info(f"[3_CHUNK] Retrieved metadata for document {doc_id}: URL={'Yes' if doc_url else 'No'}, Dates={len(doc_metadata)} fields")
+            else:
+                logger.warning(f"[3_CHUNK] No metadata found for document {doc_id} - chunks will be created without document metadata")
+            
+            # 5. Create DocChunk objects for database storage (without embeddings)
+            db_chunks = []
             for i, chunk in enumerate(cleaned_chunks):
                 # Skip empty chunks
                 if not chunk.get('text', '').strip():
                     logger.warning(f"[3_CHUNK] Skipping empty chunk {i} from {file_path}")
                     continue
+                
+                # Get existing metadata and add document URL and dates
+                chunk_metadata = chunk.get('metadata', {}).copy() if chunk.get('metadata') else {}
+                
+                # Add URL if available
+                if doc_url:
+                    chunk_metadata['url'] = doc_url
+                    chunk_metadata['document_url'] = doc_url  # Add both for compatibility
+                
+                # Add date fields from document metadata (only if not already in chunk metadata)
+                for date_key, date_value in doc_metadata.items():
+                    if date_key not in chunk_metadata:  # Don't overwrite existing metadata
+                        chunk_metadata[date_key] = date_value
                     
                 # Create a DocChunkORM object without embeddings
                 chunk_model = DocChunkORM(
@@ -286,9 +453,9 @@ async def chunk_file_one(file_path: str, force_reprocess: bool = False):
                     content=chunk.get('text', ''),
                     chunk_index=i,
                     page=chunk.get('metadata', {}).get('page_number', 0),
-                    paragraph=chunk.get('metadata', {}).get('paragraph_numbers', 0)[0],
+                    paragraph=chunk.get('metadata', {}).get('paragraph_numbers', 0)[0] if chunk.get('metadata', {}).get('paragraph_numbers') else None,
                     language=chunk.get('metadata', {}).get('language'),
-                    chunk_data=chunk.get('metadata', {}),
+                    chunk_data=chunk_metadata,
                     # Note: transformer_embedding and word2vec_embedding are left as None
                     # They will be filled in by 3.5_embed.py
                 )

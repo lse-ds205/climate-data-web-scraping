@@ -14,6 +14,7 @@
   - [Document Chunking](#document-chunking)
   - [Content Cleaning](#content-cleaning)
   - [Database Storage](#database-storage)
+- [Chunk Metadata Schema](#chunk-metadata-schema)
 - [Error Handling & Resilience](#error-handling--resilience)
 - [Database Schema](#database-schema)
 - [Performance Considerations](#performance-considerations)
@@ -268,9 +269,214 @@ The storage component uses SQLAlchemy ORM with PostgreSQL:
 **Storage Process:**
 1. Create document record if not exists
 2. Generate UUID4 for each chunk
-3. Store chunk content and metadata
+3. Store chunk content and metadata in `chunk_data` JSONB field
 4. Update document processing timestamp
 5. Handle transaction rollback on errors
+
+**Metadata Enrichment:**
+During storage, chunks are enriched with document-level metadata:
+- Document URL and dates are retrieved from the `documents` table
+- Metadata from extraction and chunking stages is preserved
+- All metadata is stored in the `chunk_data` JSONB column
+
+---
+
+## Chunk Metadata Schema
+
+The `chunk_data` field in the `doc_chunks` table stores additional metadata about each chunk in JSON format. This metadata includes information about the chunk's position in the document, extraction details, document-level information, and processing timestamps.
+
+### Schema Structure
+
+```json
+{
+  // Document Position & Structure
+  "page_number": 1,
+  "paragraph_number": 1,
+  "paragraph_numbers": [1, 2],
+  "paragraph_ids": ["para_123", "para_124"],
+  "global_paragraph_number": 5,
+  "global_paragraph_numbers": [5, 6],
+  "paragraph_id": "para_123",
+  "chunk_index": 0,
+  
+  // Document Information
+  "url": "https://unfccc.int/...",
+  "document_url": "https://unfccc.int/...",
+  "filename": "Rwanda_en_20220601.pdf",
+  "document_title": "Rwanda NDC",
+  "country": "Rwanda",
+  "language": "en",
+  
+  // Document Dates (ISO format strings)
+  "submission_date": "2022-06-01",
+  "scraped_at": "2025-11-17T23:47:07.463000+00:00",
+  "downloaded_at": "2025-11-17T23:48:15.123000+00:00",
+  "processed_at": "2025-11-17T23:50:30.456000+00:00",
+  
+  // Extraction Metadata
+  "extraction_method": "fast",
+  "extraction_status": "success",
+  "element_types": ["Text", "Paragraph"],
+  "extraction_strategy": "auto",
+  
+  // Content Metadata
+  "sentences": ["Sentence 1.", "Sentence 2."],
+  "sentence_count": 2,
+  "character_count": 256
+}
+```
+
+### Field Descriptions
+
+#### Document Position & Structure
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `page_number` | `integer` | Page number in the source document (0-indexed or 1-indexed depending on extractor) | `5` |
+| `paragraph_number` | `integer` | Paragraph number within the page (may be present from extractor) | `3` |
+| `paragraph_numbers` | `array<integer>` | List of paragraph numbers if chunk spans multiple paragraphs | `[3, 4]` |
+| `paragraph_id` | `string` | Unique identifier for the paragraph (may be present from extractor) | `"para_123"` |
+| `paragraph_ids` | `array<string>` | List of paragraph IDs if chunk spans multiple paragraphs | `["para_123", "para_124"]` |
+| `global_paragraph_number` | `integer` | Paragraph number across entire document (may be present from extractor) | `42` |
+| `global_paragraph_numbers` | `array<integer>` | List of global paragraph numbers if chunk spans multiple paragraphs | `[42, 43]` |
+| `chunk_index` | `integer` | Position of chunk within document (0-indexed, added during database insertion) | `15` |
+
+#### Document Information
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `url` | `string` | Source URL of the document (added from `documents` table) | `"https://unfccc.int/NDCREG/Pages/..."` |
+| `document_url` | `string` | Alias for `url` (for compatibility, added during database insertion) | Same as `url` |
+| `filename` | `string` | Local filename of the PDF (from extractor metadata) | `"Rwanda_en_20220601.pdf"` |
+| `document_title` | `string` | Title of the document (from extractor metadata) | `"Rwanda NDC"` |
+| `country` | `string` | Country name (from extractor metadata or filename) | `"Rwanda"` |
+| `language` | `string` | Document language code (from extractor metadata or filename) | `"en"`, `"fr"`, `"es"` |
+
+#### Document Dates
+
+All date fields are stored as ISO 8601 format strings (e.g., `"2025-11-17T23:47:07.463000+00:00"`). These are added from the `documents` table during database insertion.
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `submission_date` | `string` | Date when the document was submitted to UNFCCC (ISO date format) | `"2022-06-01"` |
+| `scraped_at` | `string` | Timestamp when document was scraped from website (ISO datetime) | `"2025-11-17T23:47:07+00:00"` |
+| `downloaded_at` | `string` | Timestamp when document PDF was downloaded (ISO datetime) | `"2025-11-17T23:48:15+00:00"` |
+| `processed_at` | `string` | Timestamp when document was processed/chunked (ISO datetime) | `"2025-11-17T23:50:30+00:00"` |
+
+**Note:** The chunk record itself has a `created_at` timestamp in the `doc_chunks` table, which is separate from these document-level dates.
+
+#### Extraction Metadata
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `extraction_method` | `string` | Method used to extract text (`"fast"`, `"auto"`, `"ocr_only"`) | `"fast"` |
+| `extraction_strategy` | `string` | Strategy that successfully extracted the text | `"auto"` |
+| `extraction_status` | `string` | Status of extraction (`"success"`, `"failed"`, `"fallback"`) | `"success"` |
+| `element_types` | `array<string>` | Types of elements in this chunk (`"Text"`, `"Title"`, `"Heading"`, etc.) | `["Text", "Paragraph"]` |
+
+#### Content Metadata
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `sentences` | `array<string>` | List of sentences in the chunk (added during chunking) | `["First sentence.", "Second sentence."]` |
+| `sentence_count` | `integer` | Number of sentences in chunk (may be calculated from `sentences` array) | `2` |
+| `character_count` | `integer` | Approximate character count (may be calculated from content) | `256` |
+
+### Field Availability
+
+Not all fields are present in every chunk. Field availability depends on:
+
+1. **Extraction method**: Different PDF extraction strategies may provide different metadata
+2. **Document structure**: Some documents may not have page numbers, paragraphs, etc.
+3. **Processing stage**: Fields are added at different stages:
+   - **During extraction**: `page_number`, `paragraph_number`, `paragraph_id`, `global_paragraph_number`, `element_types`, `filename`, `country`, `document_title`, `submission_date`
+   - **During chunking**: `paragraph_numbers` (array), `paragraph_ids` (array), `global_paragraph_numbers` (array), `sentences` (array), `element_types` (array)
+   - **During database insertion**: `url`, `document_url`, `chunk_index`, `submission_date`, `scraped_at`, `downloaded_at`, `processed_at`
+
+### Usage Examples
+
+#### Querying Chunks by Metadata
+
+```sql
+-- Find chunks from documents submitted in 2022
+SELECT * FROM doc_chunks 
+WHERE chunk_data->>'submission_date' LIKE '2022%';
+
+-- Find chunks from a specific country
+SELECT * FROM doc_chunks 
+WHERE chunk_data->>'country' = 'Rwanda';
+
+-- Find chunks from a specific page
+SELECT * FROM doc_chunks 
+WHERE (chunk_data->>'page_number')::int = 5;
+
+-- Find chunks with URLs
+SELECT * FROM doc_chunks 
+WHERE chunk_data->>'url' IS NOT NULL 
+  AND chunk_data->>'url' != '';
+```
+
+#### Accessing Metadata in Python
+
+```python
+import json
+from databases.models import DocChunkORM
+
+# Get chunk with metadata
+chunk = session.query(DocChunkORM).first()
+
+# Access metadata
+metadata = chunk.chunk_data or {}
+url = metadata.get('url')
+submission_date = metadata.get('submission_date')
+page_number = metadata.get('page_number', 0)
+```
+
+#### Filtering by Date Range
+
+```sql
+-- Find chunks from documents submitted between dates
+SELECT * FROM doc_chunks 
+WHERE chunk_data->>'submission_date' >= '2022-01-01'
+  AND chunk_data->>'submission_date' < '2023-01-01';
+```
+
+### Field Priority
+
+When the same information exists in multiple places:
+
+1. **Chunk metadata (`chunk_data`)** - Most detailed, includes document-level info
+2. **Chunk table columns** - `page`, `paragraph`, `language` (normalized fields)
+3. **Document table** - Join via `doc_id` for `url`, `submission_date`, etc.
+
+**Best Practice**: Use `chunk_data` for document-level metadata (URL, dates, country) and table columns for position metadata (page, paragraph) when available.
+
+### Metadata Flow
+
+The metadata flows through the pipeline as follows:
+
+1. **Extraction Stage** (`extractor.py`):
+   - Adds: `page_number`, `paragraph_number`, `paragraph_id`, `global_paragraph_number`, `element_type`, `filename`, `country`, `document_title`, `submission_date`, `extraction_method`, `extraction_strategy`, `extraction_status`
+
+2. **Chunking Stage** (`chunker.py`):
+   - Preserves extraction metadata
+   - Adds: `paragraph_numbers` (array), `paragraph_ids` (array), `global_paragraph_numbers` (array), `element_types` (array), `sentences` (array)
+
+3. **Database Insertion Stage** (`2_chunk.py`):
+   - Retrieves document metadata from `documents` table
+   - Adds: `url`, `document_url`, `chunk_index`, `scraped_at`, `downloaded_at`, `processed_at`
+   - Merges all metadata into `chunk_data` JSONB field
+
+### Version History
+
+- **2025-11-17**: Added `url`, `document_url`, `submission_date`, `scraped_at`, `downloaded_at`, `processed_at` fields to chunk metadata during chunking process
+- **Initial**: Basic position and extraction metadata fields
+
+### Related Documentation
+
+- [Database Schema](./db_schema.md) - Overall database structure
+- [Chunking Documentation](./2_chunk.md) - How chunks are created (this document)
+- [Scraping Documentation](./1_scrape.md) - How documents are scraped and metadata is collected
 
 ---
 

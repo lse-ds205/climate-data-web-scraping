@@ -45,22 +45,34 @@ pip install -r requirements/requirements.txt
 
 **Importantly**, install the `NLTK` downloads:
 
-## 1.1 Install Tesseract OCR
+## 1.1 Install System Dependencies
+
+### Windows Users: Visual C++ Redistributables (Required)
+
+**IMPORTANT**: Before installing Python packages, Windows users must install Microsoft Visual C++ Redistributables to avoid DLL errors with ONNX Runtime:
+
+1. **Download and install**: https://aka.ms/vs/17/release/vc_redist.x64.exe
+2. **Run the installer** and follow the prompts
+3. **Restart your terminal** after installation
+
+This is required for PDF processing and machine learning libraries.
+
+### Install Tesseract OCR
 
 The project uses Optical Character Recognition (OCR) capabilities through the `unstructured` library for PDF text extraction. You need to install Tesseract OCR:
 
-### On Windows:
+#### On Windows:
 1. Download the Tesseract installer from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
 2. Run the installer and follow the instructions
 3. Add Tesseract to your PATH environment variable (the installer should offer this option)
 4. Verify installation: `tesseract --version`
 
-### On macOS:
+#### On macOS:
 ```bash
 brew install tesseract
 ```
 
-### On Linux:
+#### On Linux:
 ```bash
 sudo apt-get update
 sudo apt-get install tesseract-ocr

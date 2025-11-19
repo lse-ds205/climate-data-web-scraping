@@ -18,6 +18,7 @@ from scrape.db_operations import (
     retrieve_allowed_countries,
     filter_documents_by_countries
 )
+from constants.entities import get_entity_manager, EntityType
 from scrape.comparator import compare_documents
 from scrape.config import ScrapingConfig, DEFAULT_CONFIG
 from exceptions import (
@@ -71,6 +72,46 @@ def run_scraping_workflow(config: Optional[ScrapingConfig] = None) -> Dict[str, 
         
         # Step 4: Filter documents by allowed countries
         logger.info("Step 4: Filtering documents by allowed countries...")
+        
+        # Get allowed countries from entities system (countries.json + country_aliases.json)
+        try:
+            entity_manager = get_entity_manager()
+            # Get all country names from entities
+            country_names = entity_manager.get_entities_by_type(EntityType.COUNTRY)
+            
+            # Get all aliases/synonyms for countries
+            country_aliases = entity_manager._aliases.get(EntityType.COUNTRY, {})
+            alias_values = []
+            for alias_key, alias_target in country_aliases.items():
+                alias_values.append(alias_key)
+                # Also add the target if it's a string (some aliases map to country names)
+                if isinstance(alias_target, str):
+                    alias_values.append(alias_target)
+            
+            # Combine country names and aliases
+            allowed_countries = list(set(country_names + alias_values))
+            
+            # Also get aliases from entity data itself (aliases stored in entity metadata)
+            for country_name, country_data in entity_manager._entities.get(EntityType.COUNTRY, {}).items():
+                entity_aliases = country_data.get('aliases', [])
+                if entity_aliases:
+                    allowed_countries.extend(entity_aliases)
+            
+            # Remove duplicates and empty strings
+            allowed_countries = list(set([c.strip() for c in allowed_countries if c and c.strip()]))
+            
+            logger.info(f"Retrieved {len(allowed_countries)} allowed countries from entities system")
+            if allowed_countries:
+                logger.debug(f"Sample countries: {', '.join(sorted(allowed_countries)[:10])}")
+        except Exception as e:
+            logger.warning(f"Could not load countries from entities system: {e}")
+            logger.warning("Falling back to database countries table (legacy)")
+            try:
+                allowed_countries = retrieve_allowed_countries()
+            except Exception as db_error:
+                logger.warning(f"Could not retrieve countries from database either: {db_error}")
+                allowed_countries = []
+        
         if allowed_countries:
             new_docs, excluded_docs = filter_documents_by_countries(scraped_docs, allowed_countries)
             logger.info(f"Kept {len(new_docs)} documents from allowed countries, excluded {len(excluded_docs)} documents")

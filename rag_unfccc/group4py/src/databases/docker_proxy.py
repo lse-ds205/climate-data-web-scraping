@@ -31,7 +31,15 @@ def is_windows_docker_mode() -> bool:
     if platform.system() != 'Windows':
         return False
     
+    # Ensure .env is loaded
+    from dotenv import load_dotenv
+    load_dotenv()
+    
     db_url = os.getenv('DATABASE_URL', '')
+    if not db_url:
+        logger.warning("DATABASE_URL not found in environment")
+        return False
+    
     if 'localhost' not in db_url and '127.0.0.1' not in db_url:
         return False
     
@@ -43,8 +51,14 @@ def is_windows_docker_mode() -> bool:
             text=True,
             timeout=5
         )
-        return 'NDC_rag' in result.stdout
-    except Exception:
+        is_running = 'NDC_rag' in result.stdout
+        if is_running:
+            logger.debug(f"Docker container NDC_rag is running, using Docker proxy mode")
+        else:
+            logger.warning(f"Docker container NDC_rag not found, falling back to direct connection")
+        return is_running
+    except Exception as e:
+        logger.warning(f"Failed to check Docker status: {e}")
         return False
 
 
@@ -76,18 +90,31 @@ def execute_sql_via_docker(sql: str, container_name: str = 'NDC_rag') -> list:
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30
         )
         
         if result.returncode != 0:
             raise Exception(f"Docker exec failed: {result.stderr}")
         
-        # Parse output
+        # Parse output - handle PostgreSQL output format
         rows = []
-        for line in result.stdout.strip().split('\n'):
-            if line.strip():
-                # Split by tab and convert to tuple
-                rows.append(tuple(line.split('\t')))
+        lines = result.stdout.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith(('(', '-', 'CREATE', 'INSERT', 'SELECT', 'UPDATE', 'DELETE')):
+                # Split by tab and clean up values
+                values = line.split('\t')
+                # Convert empty strings to None for NULL values and handle None values
+                cleaned_values = []
+                for val in values:
+                    if val is None or val.strip() == '':
+                        cleaned_values.append(None)
+                    else:
+                        cleaned_values.append(val.strip())
+                rows.append(tuple(cleaned_values))
         
         return rows
         
@@ -159,6 +186,19 @@ class DockerProxySession:
     def __init__(self, container_name: str):
         self.container_name = container_name
         self._closed = False
+    
+    def __enter__(self):
+        """Enter context manager."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager."""
+        if exc_type is not None:
+            self.rollback()
+        else:
+            self.commit()
+        self.close()
+        return False  # Don't suppress exceptions
     
     def execute(self, sql, params=None):
         """Execute SQL query with optional parameters."""
